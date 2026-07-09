@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Recipe Manager Pro</string>
+    <string name="drawer_close">メニューを閉じる</string>
+    <string name="drawer_open">メニューを開く</string>
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.DarkActionBar">
+        <item name="colorPrimary">#3498DB</item>
+        <item name="colorPrimaryDark">#2C3E50</item>
+        <item name="colorAccent">#3498DB</item>
+    </style>
+</resources>

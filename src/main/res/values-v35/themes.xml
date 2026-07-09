@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Android 15 (API 35) 以降は targetSdk 35 でエッジtoエッジ表示が強制され、
+      コンテンツがステータスバー/アクションバーの背後に描画されてしまう。
+      本アプリは全画面表示を必要としないため、公式のオプトアウト属性で従来のレイアウトに戻す。
+    -->
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.DarkActionBar">
+        <item name="colorPrimary">#3498DB</item>
+        <item name="colorPrimaryDark">#2C3E50</item>
+        <item name="colorAccent">#3498DB</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

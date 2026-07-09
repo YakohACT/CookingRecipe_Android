@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- AI API / レシピページ取得のためネットワークアクセスが必要 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:name="main.java.App"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme"
+        android:allowBackup="true"
+        android:usesCleartextTraffic="true">
+        <!-- usesCleartextTraffic: ローカルネットワーク上の Ollama (http://) へ接続するために許可 -->
+
+        <activity
+            android:name="main.java.MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
