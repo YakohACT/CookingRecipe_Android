@@ -1,0 +1,4 @@
+lib/*.jar filter=lfs diff=lfs merge=lfs -text
+lib/models/*.bin filter=lfs diff=lfs merge=lfs -text
+lib/tools/*.exe filter=lfs diff=lfs merge=lfs -text
+lib/tools/*.dll filter=lfs diff=lfs merge=lfs -text
