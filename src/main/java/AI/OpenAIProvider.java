@@ -1,12 +1,10 @@
 package main.java.AI;
 
-import main.java.Recipe.Ingredient;
+import main.java.Util.JsonUtil;
 
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * OpenAI ChatCompletions API との通信を担当するクラス。
@@ -15,15 +13,9 @@ import java.util.ArrayList;
 public class OpenAIProvider extends AbstractRecipeAIProvider {
 
     @Override
-    public String[] generateRecipe(String apiKey, String modelName, String url, ArrayList<Ingredient> allIngredients) throws Exception {
-        String response = post(apiKey, buildBody(modelName, buildPrompt(url, allIngredients)));
-        // choices[0].message.content からモデルが返したJSON文字列を抽出してパース
-        return extractAndParse(response, "content");
-    }
-
-    @Override
     public String chat(String apiKey, String modelName, String prompt) throws Exception {
-        return extractRawContent(post(apiKey, buildBody(modelName, prompt)), "content");
+        // choices[0].message.content にモデルが返したテキストが入っている
+        return extractContent(post(apiKey, buildBody(modelName, prompt)), "content");
     }
 
     /**
@@ -38,7 +30,7 @@ public class OpenAIProvider extends AbstractRecipeAIProvider {
                 + "\"model\":\"" + modelName + "\","
                 + "\"response_format\":{\"type\":\"json_object\"},"
                 + "\"temperature\":0.3,"
-                + "\"messages\":[{\"role\":\"user\",\"content\":\"" + jsonEscape(prompt) + "\"}]"
+                + "\"messages\":[{\"role\":\"user\",\"content\":\"" + JsonUtil.escape(prompt) + "\"}]"
                 + "}";
     }
 
@@ -50,23 +42,8 @@ public class OpenAIProvider extends AbstractRecipeAIProvider {
      * @throws Exception 通信失敗 / HTTP非200時
      */
     private String post(String apiKey, String body) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL("https://api.openai.com/v1/chat/completions").openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(60000);
-        conn.setDoOutput(true);
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(body.getBytes(StandardCharsets.UTF_8));
-        }
-
-        int responseCode = conn.getResponseCode();
-        if (responseCode != HttpURLConnection.HTTP_OK) {
-            String errorBody = readStream(conn.getErrorStream());
-            throw new Exception("OpenAI API エラー (HTTP " + responseCode + "): " + errorBody);
-        }
-        return readStream(conn.getInputStream());
+        return readOk(openJsonPost("https://api.openai.com/v1/chat/completions", body, 10000, 60000,
+                "Authorization", "Bearer " + apiKey), "OpenAI API エラー", "");
     }
 
     /**
@@ -79,27 +56,17 @@ public class OpenAIProvider extends AbstractRecipeAIProvider {
     @Override
     public String[] fetchAvailableModels(String apiKey) {
         if (apiKey == null || apiKey.isEmpty()) return getAvailableModels();
-        try {
-            HttpURLConnection conn = (HttpURLConnection) new URL("https://api.openai.com/v1/models").openConnection();
-            conn.setRequestMethod("GET");
-            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(10000);
-            if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) return getAvailableModels();
+        String body = httpGetOrNull("https://api.openai.com/v1/models", 5000, 10000,
+                "Authorization", "Bearer " + apiKey);
+        if (body == null) return getAvailableModels();
 
-            String body = readStream(conn.getInputStream());
-            java.util.List<String> ids = extractAllJsonStrings(body, "id");
-            java.util.List<String> filtered = new java.util.ArrayList<>();
-            for (String id : ids) {
-                if (!isChatModel(id)) continue;
-                filtered.add(id);
-            }
-            // モデル名で安定ソート
-            java.util.Collections.sort(filtered);
-            return filtered.isEmpty() ? getAvailableModels() : filtered.toArray(new String[0]);
-        } catch (Exception e) {
-            return getAvailableModels();
+        List<String> filtered = new ArrayList<>();
+        for (String id : JsonUtil.extractAllStrings(body, "id")) {
+            if (isChatModel(id)) filtered.add(id);
         }
+        // モデル名で安定ソート
+        Collections.sort(filtered);
+        return filtered.isEmpty() ? getAvailableModels() : filtered.toArray(new String[0]);
     }
 
     /**

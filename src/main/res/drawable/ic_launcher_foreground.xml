@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ランチャーアイコン(鍋)。アダプティブアイコンのセーフゾーン(中央66dp)に収まるよう描く -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- ふたのつまみ -->
+    <path android:fillColor="#FFFFFF" android:pathData="M50,36 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 Z" />
+    <!-- ふた -->
+    <path android:fillColor="#FFFFFF" android:pathData="M33,46 A21,11 0 0,1 75,46 Z" />
+    <!-- ふち -->
+    <path android:fillColor="#FFFFFF" android:pathData="M28,47 h52 v4 h-52 Z" />
+    <!-- 本体 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M32,53 h44 v17 a6,6 0 0,1 -6,6 h-32 a6,6 0 0,1 -6,-6 Z" />
+    <!-- 取っ手 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M24,55 h8 v5 h-8 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M76,55 h8 v5 h-8 Z" />
+</vector>

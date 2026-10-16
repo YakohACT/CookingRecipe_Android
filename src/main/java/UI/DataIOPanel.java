@@ -3,7 +3,6 @@ package main.java.UI;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
-import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -12,7 +11,6 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import main.java.MainActivity;
-import main.java.AI.RecipeAIService;
 import main.java.Recipe.BatchUrlImporter;
 import main.java.Recipe.Recipe;
 import main.java.Recipe.RecipeIO;
@@ -51,42 +49,42 @@ public class DataIOPanel extends ScrollView {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         form.addView(UIComponents.createTitleLabel(owner, "データ入出力"));
-        addSpacer(form, 20);
+        UIComponents.addSpacer(form, 20);
 
         // ===== エクスポート =====
-        form.addView(UIComponents.createTitleLabel(owner, "エクスポート"));
+        form.addView(UIComponents.createHeaderLabel(owner, "エクスポート"));
         form.addView(UIComponents.createLabel(owner,
                 "現在保存されている全レシピを JSON ファイルに書き出します。"
-                + "別端末への移行やバックアップに利用できます。"));
-        addSpacer(form, 8);
+                + "別端末(PC版を含む)への移行やバックアップに利用できます。"));
+        UIComponents.addSpacer(form, 8);
         Button btnExport = UIComponents.createPrimaryButton(owner, "レシピをファイルに書き出す…");
         btnExport.setOnClickListener(v -> doExport());
         form.addView(btnExport);
-        addSpacer(form, 24);
+        UIComponents.addSpacer(form, 24);
 
         // ===== インポート =====
-        form.addView(UIComponents.createTitleLabel(owner, "インポート"));
+        form.addView(UIComponents.createHeaderLabel(owner, "インポート"));
         form.addView(UIComponents.createLabel(owner,
                 "JSON ファイルからレシピを読み込み、現在のデータベースに追加します。"
                 + "既存のレシピは削除されません(同名レシピも追加されます)。"));
-        addSpacer(form, 8);
+        UIComponents.addSpacer(form, 8);
         Button btnImport = UIComponents.createPrimaryButton(owner, "ファイルからレシピを読み込む…");
         btnImport.setOnClickListener(v -> doImport());
         form.addView(btnImport);
-        addSpacer(form, 24);
+        UIComponents.addSpacer(form, 24);
 
         // ===== URLバッチ取込み (AI) =====
-        form.addView(UIComponents.createTitleLabel(owner, "URLバッチ取込み (AI)"));
+        form.addView(UIComponents.createHeaderLabel(owner, "URLバッチ取込み (AI)"));
         form.addView(UIComponents.createLabel(owner,
                 "1行に1つの URL を記述したテキスト(.txt)ファイルを選び、各 URL を"
                 + "現在選択中の AI プロバイダー(設定画面で選択中のもの)で順次解析して"
                 + "一括登録します。空行と # から始まるコメント行は無視されます。"
-                + "カテゴリーは「その他」固定で登録されるため、必要に応じて後で編集してください。"));
-        addSpacer(form, 8);
+                + "カテゴリーも AI が選びます(選べなかった場合は「その他」)。必要に応じて後で編集してください。"));
+        UIComponents.addSpacer(form, 8);
         Button btnBatch = UIComponents.createPrimaryButton(owner, "URLリストから一括登録…");
         btnBatch.setOnClickListener(v -> doBatchUrlImport());
         form.addView(btnBatch);
-        addSpacer(form, 24);
+        UIComponents.addSpacer(form, 24);
 
         // ===== 現状サマリー =====
         int count = owner.getAllRecipeList().getRecipeList().size();
@@ -94,30 +92,20 @@ public class DataIOPanel extends ScrollView {
     }
 
     /**
-     * 縦方向スペーサを追加する。
-     * @param parent   追加先
-     * @param heightDp スペーサの高さ(dp)
-     */
-    private void addSpacer(LinearLayout parent, int heightDp) {
-        View spacer = new View(owner);
-        parent.addView(spacer, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, UIComponents.dp(owner, heightDp)));
-    }
-
-    /**
-     * 指定 Uri の内容を UTF-8 テキストとして読み切る。
+     * 指定 Uri の内容を UTF-8 テキストとして1行ずつ読み込む。
      * @param uri 読み込み対象(SAFで選択されたファイル)
-     * @return ファイル内容の文字列
+     * @return ファイルの各行
      * @throws Exception 読み込み失敗時
      */
-    private String readTextFromUri(Uri uri) throws Exception {
-        StringBuilder sb = new StringBuilder();
-        try (InputStream in = owner.getContentResolver().openInputStream(uri);
-             BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+    private List<String> readLines(Uri uri) throws Exception {
+        List<String> lines = new ArrayList<>();
+        try (InputStream in = owner.getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new Exception("ファイルを開けません: " + uri);
+            BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
             String line;
-            while ((line = br.readLine()) != null) sb.append(line).append("\n");
+            while ((line = br.readLine()) != null) lines.add(line);
         }
-        return sb.toString();
+        return lines;
     }
 
     /**
@@ -126,7 +114,7 @@ public class DataIOPanel extends ScrollView {
     private void doExport() {
         List<Recipe> recipes = owner.getAllRecipeList().getRecipeList();
         if (recipes.isEmpty()) {
-            UIComponents.info(owner, "エクスポートできるレシピがありません。");
+            UIComponents.info(owner, "情報", "エクスポートできるレシピがありません。");
             return;
         }
 
@@ -135,12 +123,12 @@ public class DataIOPanel extends ScrollView {
         intent.setType("application/json");
         intent.putExtra(Intent.EXTRA_TITLE, "recipes-export.json");
 
+        // SAF の保存画面で上書きの確認・ファイル名の指定ができるため、デスクトップ版の上書き確認は不要
         owner.pickFile(intent, uri -> {
             try (OutputStream out = owner.getContentResolver().openOutputStream(uri, "wt")) {
-                String json = RecipeIO.exportToJson(recipes);
-                out.write(json.getBytes(StandardCharsets.UTF_8));
-                UIComponents.info(owner, "エクスポート完了",
-                        recipes.size() + "件のレシピを書き出しました。");
+                if (out == null) throw new Exception("ファイルを開けません: " + uri);
+                out.write(RecipeIO.exportToJson(recipes).getBytes(StandardCharsets.UTF_8));
+                UIComponents.info(owner, "エクスポート完了", recipes.size() + "件のレシピを書き出しました。");
             } catch (Exception ex) {
                 UIComponents.info(owner, "エラー", "書き出しに失敗しました: " + ex.getMessage());
                 ex.printStackTrace();
@@ -160,10 +148,10 @@ public class DataIOPanel extends ScrollView {
 
         owner.pickFile(intent, uri -> {
             try {
-                String json = readTextFromUri(uri);
+                String json = String.join("\n", readLines(uri));
                 List<Recipe> imported = RecipeIO.parseFromJson(json, owner.getIngredientMaster());
                 if (imported.isEmpty()) {
-                    UIComponents.info(owner, "ファイルから有効なレシピが見つかりませんでした。");
+                    UIComponents.info(owner, "情報", "ファイルから有効なレシピが見つかりませんでした。");
                     return;
                 }
                 UIComponents.confirm(owner, "インポート確認",
@@ -189,13 +177,8 @@ public class DataIOPanel extends ScrollView {
      * AI呼び出しは時間がかかるため進捗ダイアログを表示し、キャンセル可能にする。
      */
     private void doBatchUrlImport() {
-        // 1. AI 設定チェック (Ollama 以外は APIキー必須)
-        if (owner.getCurrentAiProvider() != RecipeAIService.Provider.OLLAMA
-                && owner.getCurrentApiKey().isEmpty()) {
-            UIComponents.info(owner, "AI未設定",
-                    "先に「AI設定」メニューでプロバイダーとAPIキーを設定してください。");
-            return;
-        }
+        // 1. AI 設定チェック (ローカルLLM以外は APIキー必須)
+        if (!UIComponents.ensureAiReady(owner, owner.getAiSettings())) return;
 
         // 2. ファイル選択
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -206,15 +189,13 @@ public class DataIOPanel extends ScrollView {
             // 3. URL 読み込み
             final List<String> urls;
             try {
-                List<String> lines = new ArrayList<>();
-                for (String line : readTextFromUri(uri).split("\n", -1)) lines.add(line);
-                urls = BatchUrlImporter.readUrls(lines);
+                urls = BatchUrlImporter.readUrls(readLines(uri));
             } catch (Exception ex) {
                 UIComponents.info(owner, "エラー", "ファイル読み込みに失敗しました: " + ex.getMessage());
                 return;
             }
             if (urls.isEmpty()) {
-                UIComponents.info(owner, "ファイル内に有効なURLが見つかりませんでした。");
+                UIComponents.info(owner, "情報", "ファイル内に有効なURLが見つかりませんでした。");
                 return;
             }
 
@@ -238,7 +219,7 @@ public class DataIOPanel extends ScrollView {
 
         TextView statusLabel = UIComponents.createLabel(owner, "準備中...");
         content.addView(statusLabel);
-        addSpacer(content, 12);
+        UIComponents.addSpacer(content, 12);
         ProgressBar bar = new ProgressBar(owner, null, android.R.attr.progressBarStyleHorizontal);
         bar.setMax(urls.size());
         content.addView(bar);
@@ -262,33 +243,12 @@ public class DataIOPanel extends ScrollView {
         });
 
         UIComponents.runAsync(
-                () -> {
-                    RecipeAIService aiService = new RecipeAIService();
-                    aiService.setConfig(owner.getCurrentAiProvider(),
-                            owner.getCurrentApiKey(),
-                            owner.getCurrentModelName());
-                    return BatchUrlImporter.importAll(urls,
-                            aiService,
-                            owner.getIngredientMaster(),
-                            owner.getAllRecipeList(),
-                            progress -> UIComponents.postToMain(() -> {
-                                // 進捗バー: PROCESSING ならカレントの開始位置、それ以外(成功/失敗/スキップ)は1件分加算
-                                int progressed = progress.index
-                                        + (progress.status == BatchUrlImporter.Status.PROCESSING ? 0 : 1);
-                                bar.setProgress(progressed);
-                                String stage;
-                                switch (progress.status) {
-                                    case PROCESSING:        stage = "解析中"; break;
-                                    case SUCCEEDED:         stage = "登録完了"; break;
-                                    case SKIPPED_DUPLICATE: stage = "スキップ(URL重複)"; break;
-                                    case FAILED:
-                                    default:                stage = "失敗"; break;
-                                }
-                                statusLabel.setText("[" + (progress.index + 1) + "/" + progress.total + "] "
-                                        + stage + ": " + progress.url);
-                            }),
-                            cancelled::get);
-                },
+                () -> BatchUrlImporter.importAll(urls,
+                        owner.getAiSettings().createService(),
+                        owner.getIngredientMaster(),
+                        owner.getAllRecipeList(),
+                        progress -> UIComponents.postToMain(() -> showProgress(progress, bar, statusLabel)),
+                        cancelled::get),
                 result -> {
                     dialog.dismiss();
                     String msg = (cancelled.get() ? "キャンセルされました。\n" : "一括登録が完了しました。\n")
@@ -303,5 +263,25 @@ public class DataIOPanel extends ScrollView {
                     UIComponents.info(owner, "エラー", "一括登録に失敗しました: " + ex.getMessage());
                     ex.printStackTrace();
                 });
+    }
+
+    /**
+     * 進捗を進捗バーと状態表示に反映する。
+     * @param progress    進捗
+     * @param bar         進捗バー
+     * @param statusLabel 状態表示
+     */
+    private static void showProgress(BatchUrlImporter.Progress progress, ProgressBar bar, TextView statusLabel) {
+        // 進捗バー: PROCESSING ならカレントの開始位置、それ以外(成功/失敗/スキップ)は1件分加算
+        bar.setProgress(progress.index + (progress.status == BatchUrlImporter.Status.PROCESSING ? 0 : 1));
+        String stage;
+        switch (progress.status) {
+            case PROCESSING:        stage = "解析中"; break;
+            case SUCCEEDED:         stage = "登録完了"; break;
+            case SKIPPED_DUPLICATE: stage = "スキップ(URL重複)"; break;
+            case FAILED:
+            default:                stage = "失敗"; break;
+        }
+        statusLabel.setText("[" + (progress.index + 1) + "/" + progress.total + "] " + stage + ": " + progress.url);
     }
 }

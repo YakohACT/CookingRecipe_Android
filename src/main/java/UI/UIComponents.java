@@ -1,5 +1,6 @@
 package main.java.UI;
 
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.res.ColorStateList;
@@ -7,18 +8,23 @@ import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Html;
+import android.text.InputType;
 import android.text.method.LinkMovementMethod;
 import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
+import android.widget.AutoCompleteTextView;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.Filter;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
 
+import main.java.AI.AiSettings;
 import main.java.Recipe.Ingredient;
+import main.java.Recipe.Quantity;
 import main.java.Recipe.Recipe;
 import main.java.Recipe.RecipeCategory;
 
@@ -30,7 +36,7 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
- * 各画面で共通利用するAndroid UIコンポーネントの生成ヘルパー。
+ * 各画面で共通利用するAndroid UIコンポーネントの生成ヘルパー
  * (デスクトップ版の Swing ヘルパーの置き換え。役割はほぼ同一)
  */
 public final class UIComponents {
@@ -54,8 +60,19 @@ public final class UIComponents {
     }
 
     /**
+     * 縦方向スペーサを追加する(Box.createRigidArea の置き換え)。
+     * @param parent   追加先
+     * @param heightDp スペーサの高さ(dp)
+     */
+    public static void addSpacer(LinearLayout parent, int heightDp) {
+        View spacer = new View(parent.getContext());
+        parent.addView(spacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(parent.getContext(), heightDp)));
+    }
+
+    /**
      * バックグラウンドで task を実行し、結果をメインスレッドのコールバックへ渡す。
-     * (SwingWorker#doInBackground/done の置き換え)
+     * (SwingWorker#doInBackground/done の置き換え。Android ではメインスレッドで通信できないため必須)
      * @param task      バックグラウンドで実行する処理
      * @param onSuccess 成功時コールバック(メインスレッド)
      * @param onError   失敗時コールバック(メインスレッド)
@@ -81,11 +98,24 @@ public final class UIComponents {
     }
 
     /**
+     * ダイアログを表示できる状態かを返す。
+     * 非同期処理の完了時にテーマ切替などで画面が作り直されていると、古い Activity では表示できない
+     * @param context コンテキスト
+     * @return 表示できれば true
+     */
+    public static boolean canShowDialog(Context context) {
+        if (!(context instanceof Activity)) return true;
+        Activity a = (Activity) context;
+        return !a.isFinishing() && !a.isDestroyed();
+    }
+
+    /**
      * 情報ダイアログを表示する(JOptionPane.showMessageDialog の置き換え)。
      * @param context コンテキスト
      * @param message 表示するメッセージ
      */
     public static void info(Context context, String message) {
+        if (!canShowDialog(context)) return;
         new AlertDialog.Builder(context)
                 .setMessage(message)
                 .setPositiveButton("OK", null)
@@ -99,6 +129,7 @@ public final class UIComponents {
      * @param message 表示するメッセージ
      */
     public static void info(Context context, String title, String message) {
+        if (!canShowDialog(context)) return;
         new AlertDialog.Builder(context)
                 .setTitle(title)
                 .setMessage(message)
@@ -114,6 +145,7 @@ public final class UIComponents {
      * @param onOk    OK 押下時の処理
      */
     public static void confirm(Context context, String title, String message, Runnable onOk) {
+        if (!canShowDialog(context)) return;
         new AlertDialog.Builder(context)
                 .setTitle(title)
                 .setMessage(message)
@@ -134,6 +166,65 @@ public final class UIComponents {
         field.setTextSize(TypedValue.COMPLEX_UNIT_SP, Theme.TEXT_SIZE_MAIN);
         field.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return field;
+    }
+
+    /**
+     * 単位入力欄を生成する。タップすると {@link Quantity#COMMON_UNITS} の候補が出て、直接入力もできる。
+     * (デスクトップ版の編集可能な JComboBox の置き換え)
+     * @param context コンテキスト
+     * @return 単位入力欄
+     */
+    public static AutoCompleteTextView createUnitField(Context context) {
+        AutoCompleteTextView field = new AutoCompleteTextView(context);
+        field.setSingleLine(true);
+        field.setTextSize(TypedValue.COMPLEX_UNIT_SP, Theme.TEXT_SIZE_MAIN);
+        field.setHint("単位");
+        field.setThreshold(1);
+        field.setAdapter(new UnfilteredAdapter(context, Quantity.COMMON_UNITS));
+        field.setOnClickListener(v -> field.showDropDown());
+        field.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) field.showDropDown();
+        });
+        return field;
+    }
+
+    /** 入力中の文字で候補を絞り込まず、常に全候補を出す AutoCompleteTextView 用アダプタ */
+    private static final class UnfilteredAdapter extends ArrayAdapter<String> {
+        private final List<String> all;
+
+        UnfilteredAdapter(Context context, List<String> values) {
+            super(context, android.R.layout.simple_dropdown_item_1line, values);
+            this.all = values;
+        }
+
+        @Override
+        public Filter getFilter() {
+            return new Filter() {
+                @Override
+                protected FilterResults performFiltering(CharSequence constraint) {
+                    FilterResults r = new FilterResults();
+                    r.values = all;
+                    r.count = all.size();
+                    return r;
+                }
+
+                @Override
+                protected void publishResults(CharSequence constraint, FilterResults results) {
+                    notifyDataSetChanged();
+                }
+            };
+        }
+    }
+
+    /**
+     * パスワード入力欄(APIキー用)を生成する(JPasswordField の置き換え)。
+     * @param context コンテキスト
+     * @return 入力文字が伏せ字になる EditText
+     */
+    public static EditText createPasswordField(Context context) {
+        EditText field = createStyledTextField(context);
+        field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         return field;
     }
 
@@ -165,6 +256,18 @@ public final class UIComponents {
     }
 
     /**
+     * 画面内の見出し用の太字ラベルを生成する(タイトルより一回り小さい)。
+     * @param context コンテキスト
+     * @param text    表示文字列
+     * @return スタイル適用済みの TextView
+     */
+    public static TextView createHeaderLabel(Context context, String text) {
+        TextView label = createTitleLabel(context, text);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, Theme.TEXT_SIZE_HEADER);
+        return label;
+    }
+
+    /**
      * テーマのプライマリ色を背景にした強調ボタンを生成する。
      * @param context コンテキスト
      * @param text    ボタンに表示するラベル
@@ -175,7 +278,7 @@ public final class UIComponents {
     }
 
     /**
-     * 指定色を背景・白文字のボタンを生成する。
+     * 指定色を背景・白文字のボタンを生成する(削除ボタンなど)。
      * @param context コンテキスト
      * @param text    ボタンに表示するラベル
      * @param color   背景色(ARGB)
@@ -188,6 +291,42 @@ public final class UIComponents {
         btn.setTextColor(Theme.COLOR_TEXT_LIGHT);
         btn.setBackgroundTintList(ColorStateList.valueOf(color));
         return btn;
+    }
+
+    /**
+     * AI機能を呼び出すボタン(紫色)を生成する。
+     * @param context コンテキスト
+     * @param text    ボタンに表示するラベル
+     * @return スタイル適用済みの Button
+     */
+    public static Button createAiButton(Context context, String text) {
+        return createColoredButton(context, text, Theme.COLOR_AI);
+    }
+
+    /**
+     * 通常のボタン(テーマ既定の見た目)を生成する。
+     * @param context コンテキスト
+     * @param text    ボタンに表示するラベル
+     * @return Button
+     */
+    public static Button createButton(Context context, String text) {
+        Button btn = new Button(context);
+        btn.setText(text);
+        btn.setAllCaps(false);
+        return btn;
+    }
+
+    /**
+     * AIを呼び出せる設定になっているかを確認し、未設定なら警告ダイアログを出す。
+     * @param context ダイアログの表示先
+     * @param ai      AI利用設定
+     * @return 呼び出し可能なら true
+     */
+    public static boolean ensureAiReady(Context context, AiSettings ai) {
+        if (ai.isReady()) return true;
+        info(context, "AI未設定",
+                "先に「AI設定」メニューでプロバイダーとAPIキー(llama.cpp の場合はサーバーURL)を設定してください。");
+        return false;
     }
 
     /**
@@ -244,8 +383,7 @@ public final class UIComponents {
      */
     @SuppressWarnings("unchecked")
     public static <T> T selectedItem(Spinner spinner) {
-        Object item = spinner.getSelectedItem();
-        return (T) item;
+        return (T) spinner.getSelectedItem();
     }
 
     /**
@@ -257,12 +395,13 @@ public final class UIComponents {
     public static TextView createDetailArea(Context context) {
         TextView area = new TextView(context);
         area.setTextSize(TypedValue.COMPLEX_UNIT_SP, Theme.TEXT_SIZE_MAIN);
-        int pad = dp(context, 16);
+        area.setLineSpacing(0f, 1.2f);
+        int pad = dp(context, 12);
         area.setPadding(pad, pad, pad, pad);
-        // <a href> リンクをタップでブラウザ起動できるようにする
-        area.setMovementMethod(LinkMovementMethod.getInstance());
         // 長押しでテキスト選択・コピーができるようにする(右クリックメニューの置き換え)
         area.setTextIsSelectable(true);
+        // <a href> リンクをタップでブラウザ起動できるようにする(setTextIsSelectable の後に設定する)
+        area.setMovementMethod(LinkMovementMethod.getInstance());
         return area;
     }
 
@@ -272,9 +411,14 @@ public final class UIComponents {
      * @param recipe 表示するレシピ
      */
     public static void updateDetailArea(TextView area, Recipe recipe) {
-        String ings = recipe.getIngredients().stream()
-                .map(Ingredient::getName)
-                .collect(Collectors.joining(", "));
+        // 食材は1行に1つ、分量があれば「・鶏もも　200g」のように並べる
+        StringBuilder ings = new StringBuilder();
+        for (Ingredient ing : recipe.getIngredients()) {
+            Quantity q = recipe.getQuantity(ing);
+            if (ings.length() > 0) ings.append("<br>");
+            ings.append("・").append(escapeHtml(ing.getName()));
+            if (!q.isEmpty()) ings.append("　").append(escapeHtml(q.toString()));
+        }
         String categories = recipe.getCategories().stream()
                 .map(RecipeCategory::getDisplayName)
                 .collect(Collectors.joining(", "));
@@ -287,8 +431,8 @@ public final class UIComponents {
                     ? ""
                     : "<a href=\"" + escapeAttr(url) + "\">" + escapeHtml(url) + "</a>")
                 + "<br><br>"
-                + "<b>【必要食材】</b><br>" + escapeHtml(ings);
-        area.setText(Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT));
+                + "<b>【必要食材】</b><br>" + ings;
+        area.setText(Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY));
     }
 
     /**

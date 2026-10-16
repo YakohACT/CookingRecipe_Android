@@ -1,6 +1,8 @@
 package main.java.UI;
 
 import android.app.AlertDialog;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
@@ -11,15 +13,12 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import main.java.MainActivity;
-import main.java.AI.RecipeAIService;
 import main.java.Recipe.Ingredient;
 import main.java.Recipe.IngredientCategory;
 import main.java.Recipe.IngredientNormalizer;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * 登録済み食材一覧を閲覧・編集する画面パネル。
@@ -46,26 +45,30 @@ public class IngredientMasterPanel extends LinearLayout {
         int pad = UIComponents.dp(owner, 16);
         setPadding(pad, pad, pad, pad);
 
-        // ===== ヘッダー =====
-        addView(UIComponents.createTitleLabel(owner, "食材管理"));
-        TextView hint = UIComponents.createLabel(owner,
-                "カテゴリー欄をタップすると変更できます。↑/↓で並び順を変更できます。"
-                + "「変更を保存」を押すと database.csv に書き戻します。");
-        hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f);
-        addView(hint);
-
-        Button btnUnify = UIComponents.createColoredButton(owner, "✨ 表記ゆれをAIで統一", Theme.COLOR_AI);
+        // ===== ヘッダー(タイトル + 表記ゆれをAIで統一するボタン) =====
+        LinearLayout titleRow = new LinearLayout(owner);
+        titleRow.setOrientation(HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.addView(UIComponents.createTitleLabel(owner, "食材管理"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button btnUnify = UIComponents.createAiButton(owner, "✨ 表記ゆれをAIで統一");
         btnUnify.setOnClickListener(v -> detectAndUnifyVariants());
-        addView(btnUnify, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        titleRow.addView(btnUnify);
+        addView(titleRow);
+
+        TextView hint = UIComponents.createLabel(owner,
+                "食材名をタップするとカテゴリーを変更できます。"
+                + "↑/↓で並び順を変更できます。"
+                + "「変更を保存」を押すと database.csv に書き戻します。");
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        addView(hint);
 
         // ===== 一覧 =====
         working.addAll(owner.getIngredientMaster().getAllIngredients());
         adapter = new IngredientAdapter();
         ListView list = new ListView(owner);
         list.setAdapter(adapter);
-        addView(list, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         // ===== 保存ボタン =====
         Button btnSave = UIComponents.createPrimaryButton(owner, "変更を保存");
@@ -74,7 +77,7 @@ public class IngredientMasterPanel extends LinearLayout {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    /** 食材1行(番号 + 名前/カテゴリー + ↑/↓ボタン)を表示するアダプタ */
+    /** 食材1行(番号 + 食材名 + カテゴリー + ↑/↓ボタン)を表示するアダプタ */
     private final class IngredientAdapter extends BaseAdapter {
 
         @Override
@@ -94,7 +97,7 @@ public class IngredientMasterPanel extends LinearLayout {
             row.setOrientation(HORIZONTAL);
             int p = UIComponents.dp(owner, 4);
             row.setPadding(p, p, p, p);
-            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
 
             // 番号 + 食材名 + カテゴリー(タップでカテゴリー変更)
             TextView label = UIComponents.createLabel(owner,
@@ -102,21 +105,24 @@ public class IngredientMasterPanel extends LinearLayout {
             label.setOnClickListener(v -> showCategoryPicker(position));
             row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-            Button up = new Button(owner);
-            up.setText("↑");
-            up.setMinWidth(UIComponents.dp(owner, 44));
-            up.setMinimumWidth(UIComponents.dp(owner, 44));
-            up.setOnClickListener(v -> move(position, -1));
-            row.addView(up);
-
-            Button down = new Button(owner);
-            down.setText("↓");
-            down.setMinWidth(UIComponents.dp(owner, 44));
-            down.setMinimumWidth(UIComponents.dp(owner, 44));
-            down.setOnClickListener(v -> move(position, 1));
-            row.addView(down);
-
+            row.addView(createMoveButton("↑", position, -1));
+            row.addView(createMoveButton("↓", position, 1));
             return row;
+        }
+
+        /**
+         * 行を上下に移動するボタンを生成する。
+         * @param text     ボタン表示
+         * @param position 対象行
+         * @param delta    -1=上、+1=下
+         * @return ボタン
+         */
+        private Button createMoveButton(String text, int position, int delta) {
+            Button b = UIComponents.createButton(owner, text);
+            b.setMinWidth(UIComponents.dp(owner, 44));
+            b.setMinimumWidth(UIComponents.dp(owner, 44));
+            b.setOnClickListener(v -> move(position, delta));
+            return b;
         }
     }
 
@@ -163,18 +169,12 @@ public class IngredientMasterPanel extends LinearLayout {
      * AIの呼び出しは進捗ダイアログ付きでバックグラウンド実行する。
      */
     private void detectAndUnifyVariants() {
-        // Ollama 以外は APIキー必須
-        if (owner.getCurrentAiProvider() != RecipeAIService.Provider.OLLAMA
-                && owner.getCurrentApiKey().isEmpty()) {
-            UIComponents.info(owner, "AI未設定",
-                    "先に「AI設定」メニューでプロバイダーとAPIキーを設定してください。");
-            return;
-        }
+        // ローカルLLM(Ollama / llama.cpp)以外は APIキー必須
+        if (!UIComponents.ensureAiReady(owner, owner.getAiSettings())) return;
 
-        List<String> names = new ArrayList<>();
-        for (Ingredient ing : owner.getIngredientMaster().getAllIngredients()) names.add(ing.getName());
+        List<String> names = owner.getIngredientMaster().getAllIngredientNames();
         if (names.size() < 2) {
-            UIComponents.info(owner, "食材が2件未満のため、表記ゆれ検出をスキップしました。");
+            UIComponents.info(owner, "情報", "食材が2件未満のため、表記ゆれ検出をスキップしました。");
             return;
         }
 
@@ -184,8 +184,7 @@ public class IngredientMasterPanel extends LinearLayout {
         int p = UIComponents.dp(owner, 24);
         content.setPadding(p, p, p, p);
         content.addView(UIComponents.createLabel(owner, "食材名を解析しています。しばらくお待ちください…"));
-        ProgressBar bar = new ProgressBar(owner);
-        content.addView(bar);
+        content.addView(new ProgressBar(owner));
         AlertDialog dialog = new AlertDialog.Builder(owner)
                 .setTitle("AIが表記ゆれを解析中…")
                 .setView(content)
@@ -194,13 +193,7 @@ public class IngredientMasterPanel extends LinearLayout {
         dialog.show();
 
         UIComponents.runAsync(
-                () -> {
-                    RecipeAIService svc = new RecipeAIService();
-                    svc.setConfig(owner.getCurrentAiProvider(),
-                            owner.getCurrentApiKey(),
-                            owner.getCurrentModelName());
-                    return svc.detectIngredientVariants(names);
-                },
+                () -> IngredientNormalizer.detectVariants(owner.getAiSettings().createService(), names),
                 groups -> {
                     dialog.dismiss();
                     handleDetectedGroups(groups);
@@ -219,19 +212,9 @@ public class IngredientMasterPanel extends LinearLayout {
      * @param groups AIが返した表記ゆれグループ
      */
     private void handleDetectedGroups(List<IngredientNormalizer.VariantGroup> groups) {
-        // 現在マスタに実在する名前だけに絞り込み、表示用に整形
-        Set<String> existing = new HashSet<>();
-        for (Ingredient ing : owner.getIngredientMaster().getAllIngredients()) existing.add(ing.getName());
-
-        List<IngredientNormalizer.VariantGroup> effective = new ArrayList<>();
-        for (IngredientNormalizer.VariantGroup g : groups) {
-            if (g.canonical == null || !existing.contains(g.canonical)) continue;
-            List<String> vs = new ArrayList<>();
-            for (String v : g.variants) {
-                if (v != null && existing.contains(v) && !v.equals(g.canonical)) vs.add(v);
-            }
-            if (!vs.isEmpty()) effective.add(new IngredientNormalizer.VariantGroup(g.canonical, vs));
-        }
+        // 現在マスタに実在する名前だけに絞り込んでから確認画面に表示する
+        List<IngredientNormalizer.VariantGroup> effective =
+                IngredientNormalizer.filterExisting(groups, owner.getIngredientMaster());
 
         if (effective.isEmpty()) {
             UIComponents.info(owner, "検出結果", "表記ゆれは見つかりませんでした。");

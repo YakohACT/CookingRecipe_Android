@@ -17,15 +17,19 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * CSVから食材データを読み込み管理するクラス。
- * LinkedHashMap を使うことで、CSVに記述された順序のまま取り出せる
+ * CSVから食材データを読み込み管理するクラス
+ * Android 版では database.csv をアプリ専用ファイル領域(filesDir)に置き、
+ * 初回起動時に assets に同梱した database.csv をコピーして初期データとする
  */
 public class IngredientMaster {
-    private LinkedHashMap<Ingredient, String> database;
+    /** UTF-8 の BOM(ファイル先頭に付くことがある) */
+    private static final String BOM = String.valueOf((char) 0xFEFF);
+    /** 食材名 → 食材。CSVの並び順を保持する */
+    private final LinkedHashMap<String, Ingredient> database;
 
     /**
-     * インスタンス生成と同時に database.csv を読み込む。
-     * CSV が見つからない場合は database が空のまま生成される。
+     * コンストラクタ
+     * 同時にdatabase.csvを読み込む
      */
     public IngredientMaster() {
         database = new LinkedHashMap<>();
@@ -33,15 +37,12 @@ public class IngredientMaster {
     }
 
     /**
-     * database.csv からのデータ読み込み。
-     * 実行ディレクトリ依存の相対パスをまず試し、それでも見つからない場合は
-     * 自身のJAR(またはクラスファイル)と同階層・1つ上の階層も探す。
-     * jpackage で配布された .exe からの起動でも見つかるようになっている
+     * database.csvをロードするメソッド
      */
     private void loadCsv() {
         File file = locateCsv();
         if (file == null) {
-            System.err.println("[IngredientMaster] database.csv \u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002\u98DF\u6750\u30EA\u30B9\u30C8\u306F\u7A7A\u306E\u307E\u307E\u8D77\u52D5\u3057\u307E\u3059\u3002");
+            System.err.println("[IngredientMaster] database.csv が見つかりません。食材リストは空のまま起動します。");
             return;
         }
 
@@ -50,12 +51,12 @@ public class IngredientMaster {
             String line;
             while ((line = br.readLine()) != null) {
                 lineNo++;
-                line = line.replace("\uFEFF", "").trim();
+                line = line.replace(BOM, "").trim();
                 if (line.isEmpty()) continue;
                 String[] data = line.split(",");
                 if (data.length < 2) {
                     System.err.println("[IngredientMaster] " + file.getName() + ":" + lineNo
-                            + " \u5217\u304C\u4E0D\u8DB3\u3057\u3066\u3044\u308B\u305F\u3081\u30B9\u30AD\u30C3\u30D7: " + line);
+                            + " 列が不足しているためスキップ: " + line);
                     continue;
                 }
                 String catStr = data[0].trim();
@@ -65,24 +66,24 @@ public class IngredientMaster {
                     cat = IngredientCategory.valueOf(catStr);
                 } catch (IllegalArgumentException e) {
                     System.err.println("[IngredientMaster] " + file.getName() + ":" + lineNo
-                            + " \u672A\u77E5\u306E\u30AB\u30C6\u30B4\u30EA '" + catStr + "' \u306E\u305F\u3081\u30B9\u30AD\u30C3\u30D7");
+                            + " 未知のカテゴリ '" + catStr + "' のためスキップ");
                     continue;
                 }
-                database.put(new Ingredient(name, cat), name);
+                // 同名の行が複数ある場合は先に出てきたものを採用する
+                database.putIfAbsent(name, new Ingredient(name, cat));
             }
         } catch (IOException e) {
-            System.err.println("[IngredientMaster] CSV\u8AAD\u307F\u8FBC\u307F\u306B\u5931\u6557: " + e.getMessage());
+            System.err.println("[IngredientMaster] CSV読み込みに失敗: " + e.getMessage());
         }
     }
 
     /**
-     * database.csv の実体ファイルを返す。
-     * Android ではアプリ専用ファイル領域(filesDir)固定で、
-     * 初回起動時に assets に同梱した database.csv をコピーして初期データとする。
+     * database.csv の実体ファイルを返すメソッド
+     * Android ではアプリ専用ファイル領域(filesDir)固定で、無ければ assets から初期データをコピーする
      * @return CSV ファイル。初期コピーにも失敗した場合は null
      */
     private File locateCsv() {
-        File f = new File(App.context().getFilesDir(), "database.csv");
+        File f = csvFile();
         if (!f.exists()) {
             copyFromAssets(f);
         }
@@ -90,8 +91,15 @@ public class IngredientMaster {
     }
 
     /**
-     * assets/database.csv を指定ファイルへコピーする(初回起動時の初期データ展開)。
-     * 失敗時はログに出すのみで、呼び出し側が null 判定でフォールバックする。
+     * @return filesDir/database.csv
+     */
+    private static File csvFile() {
+        return new File(App.context().getFilesDir(), "database.csv");
+    }
+
+    /**
+     * assets/database.csv を指定ファイルへコピーするメソッド(初回起動時の初期データ展開)
+     * 失敗時はログに出すのみで、呼び出し側が null 判定でフォールバックする
      * @param dest コピー先ファイル
      */
     private static void copyFromAssets(File dest) {
@@ -106,30 +114,37 @@ public class IngredientMaster {
     }
 
     /**
-     * 指定カテゴリーに属する食材を CSV 順で返す。
+     * 指定カテゴリーに属する食材を返すメソッド
      * @param category 絞り込みたい食材カテゴリー
-     * @return 該当食材のリスト(マッチが無い場合は空のリスト)
+     * @return 該当食材のリスト
      */
     public ArrayList<Ingredient> searchIngredient(IngredientCategory category) {
         ArrayList<Ingredient> list = new ArrayList<>();
-        for (Ingredient ing : database.keySet()) {
+        for (Ingredient ing : database.values()) {
             if (ing.getCategory() == category) list.add(ing);
         }
         return list;
     }
 
     /**
-     * 全食材を CSV に記述された順序で返す。
+     * 全ての食材を登録順で返すメソッド
      * @return 全食材のリスト
      */
     public ArrayList<Ingredient> getAllIngredients() {
-        return new ArrayList<>(database.keySet());
+        return new ArrayList<>(database.values());
     }
 
     /**
-     * 食材一覧を一括置換する(順序・カテゴリの変更を反映)。
-     * メモリ上の database を引数のリストの内容で書き換え、database.csv 全体を書き直す。
-     * 順序はリストの順序がそのまま使われる。
+     * 全ての食材名を登録順で返すメソッド(AIへ渡す食材リストなどに使う)
+     * @return 全食材名のリスト
+     */
+    public List<String> getAllIngredientNames() {
+        return new ArrayList<>(database.keySet());
+    }
+
+
+    /**
+     * メモリ上のdatabaseを引数のリストの内容で書き換え、database.csv全体を書き直す
      * @param ordered 新しい食材一覧(順序を保持)
      */
     public void replaceAll(List<Ingredient> ordered) {
@@ -137,43 +152,41 @@ public class IngredientMaster {
         database.clear();
         for (Ingredient ing : ordered) {
             if (ing == null || ing.getName() == null || ing.getName().isEmpty()) continue;
-            database.put(ing, ing.getName());
+            database.putIfAbsent(ing.getName(), ing);
         }
         saveCsv();
     }
 
     /**
-     * 現在のメモリ上の食材一覧を database.csv に上書き保存する。
+     * database.csvに上書き保存するメソッド
      */
     private void saveCsv() {
-        File csv = locateCsv();
-        if (csv == null) {
-            csv = new File(App.context().getFilesDir(), "database.csv");
-        }
         try {
             List<String> lines = new ArrayList<>();
-            for (Ingredient ing : database.keySet()) {
+            for (Ingredient ing : database.values()) {
                 lines.add(ing.getCategory().name() + "," + ing.getName());
             }
-            Files.write(csv.toPath(), lines, StandardCharsets.UTF_8);
+            Files.write(csvFile().toPath(), lines, StandardCharsets.UTF_8);
         } catch (Exception e) {
             System.err.println("[IngredientMaster] CSV保存に失敗: " + e.getMessage());
         }
     }
 
     /**
-     * 食材を OTHER カテゴリで追加する(同名の食材が既にあればそれを返す)。
-     * メモリ上のマスタ・database.csv の両方に反映される。
+     * 食材を OTHER カテゴリで追加するメソッド
+     * 既に同名の食材があれば追加せずにそれを返すため、「名前から食材を引く(無ければ追加)」用途にも使える
+     * メモリ上のマスタ・database.csv の両方に反映される
      * @param name 食材名
-     * @return 追加された(または既存の)Ingredient。空文字/null の場合は null
+     * @return 追加された(または既存の)Ingredient、空文字やnullの場合はnull
      */
     public Ingredient addIngredient(String name) {
         return addIngredient(name, IngredientCategory.OTHER);
     }
 
     /**
-     * 食材を指定カテゴリで追加する(同名の食材が既にあればそれを返す)。
-     * メモリ上のマスタ・database.csv の両方に反映される。
+     * 食材を指定カテゴリで追加するメソッド
+     * 既に同名の食材があれば追加せずにそれを返す
+     * メモリ上のマスタ・database.csvの両方に反映される
      * @param name     食材名
      * @param category 食材カテゴリ
      * @return 追加された(または既存の)Ingredient。空文字/null の場合は null
@@ -182,41 +195,34 @@ public class IngredientMaster {
         if (name == null) return null;
         String trimmed = name.trim();
         if (trimmed.isEmpty()) return null;
-        // 既に同名の食材があればそれを返す(equalsは名前一致)
-        for (Ingredient existing : database.keySet()) {
-            if (existing.getName().equals(trimmed)) return existing;
-        }
+        Ingredient existing = database.get(trimmed);
+        if (existing != null) return existing;
         Ingredient newIng = new Ingredient(trimmed, category);
-        database.put(newIng, trimmed);
+        database.put(trimmed, newIng);
         appendToCsv(category, trimmed);
         return newIng;
     }
 
     /**
-     * database.csv の末尾に "<CATEGORY>,<name>" を追記する。
-     * 既に同じ行があればスキップする。失敗時は黙殺する(マスタ追加自体は in-memory に反映済み)。
+     * database.csv の末尾に "<CATEGORY>,<name>" を追記するメソッド
      * @param category 食材カテゴリ
      * @param name     食材名
      */
     private void appendToCsv(IngredientCategory category, String name) {
-        File csv = locateCsv();
-        if (csv == null) {
-            // 既存のCSVが見つからない場合はアプリ専用ファイル領域に新規作成する
-            csv = new File(App.context().getFilesDir(), "database.csv");
-        }
+        File csv = csvFile();
         String entry = category.name() + "," + name;
         try {
             List<String> lines = csv.exists()
                     ? Files.readAllLines(csv.toPath(), StandardCharsets.UTF_8)
                     : new ArrayList<>();
-            // 既に同じ行がある場合は何もしない(冪等)。BOM混入も考慮
+            // 既に同じ行がある場合は何もしない
             for (String l : lines) {
-                if (l.replace("﻿", "").trim().equals(entry)) return;
+                if (l.replace(BOM, "").trim().equals(entry)) return;
             }
             lines.add(entry);
             Files.write(csv.toPath(), lines, StandardCharsets.UTF_8);
         } catch (Exception ignore) {
-            // 読み書き失敗は無視。in-memoryの追加は既に成功している
+            // 読み書き失敗は無視
         }
     }
 }

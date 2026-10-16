@@ -1,11 +1,14 @@
 package main.java.AI;
 
+import main.java.Util.JsonUtil;
+
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -25,14 +28,15 @@ public final class WebPageFetcher {
 
     /**
      * URLのHTMLを取得し、タグ除去後のプレーンテキストを返す。
+     * ページに材料の構造化データ(JSON-LD)があれば、分量を確実に渡すため本文より先に付ける。
      * 失敗時は空文字を返し呼び出し側のフローを止めない。
      * @param url 取得対象のURL
-     * @return プレーンテキスト化したページ内容(最大3000文字、失敗時は空文字)
+     * @return プレーンテキスト化したページ内容(本文は最大3000文字、失敗時は空文字)
      */
     public static String fetchSummary(String url) {
         if (url == null || url.trim().isEmpty()) return "";
         try {
-            HttpURLConnection conn = (HttpURLConnection) new URL(url.trim()).openConnection();
+            HttpURLConnection conn = (HttpURLConnection) URI.create(url.trim()).toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setRequestProperty("User-Agent", "Mozilla/5.0 (compatible; RecipeManager/1.0)");
             conn.setRequestProperty("Accept", "text/html,application/xhtml+xml");
@@ -64,7 +68,8 @@ public final class WebPageFetcher {
             if (text.length() > MAX_TEXT_LENGTH) {
                 text = text.substring(0, MAX_TEXT_LENGTH) + "…";
             }
-            return text;
+            String ingredients = extractRecipeIngredients(html);
+            return ingredients.isEmpty() ? text : ingredients + "\n\n" + text;
         } catch (Exception e) {
             return "";
         }
@@ -89,6 +94,26 @@ public final class WebPageFetcher {
             total += n;
         }
         return out.toByteArray();
+    }
+
+    /**
+     * レシピサイトが埋め込んでいる構造化データ(schema.org の Recipe / JSON-LD)から材料と分量を取り出す。
+     * 本文テキストは文字数上限で切れることがあり、script タグ内のこのデータは本文化で消えるため個別に読む。
+     * @param html 元のHTML文字列
+     * @return 「【材料(ページの構造化データ)】」で始まる箇条書き。見つからなければ空文字
+     */
+    private static String extractRecipeIngredients(String html) {
+        List<String> items = JsonUtil.extractStringArray(html, "recipeIngredient");
+        if (items.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("【材料(ページの構造化データ)】\n");
+        String yield = JsonUtil.extractScalar(html, "recipeYield");
+        if (yield == null) yield = String.join(" / ", JsonUtil.extractStringArray(html, "recipeYield"));
+        if (!yield.trim().isEmpty()) sb.append("分量: ").append(yield.trim()).append("\n");
+        for (String item : items) {
+            String s = item.trim();
+            if (!s.isEmpty()) sb.append("- ").append(s).append("\n");
+        }
+        return sb.toString().trim();
     }
 
     /**

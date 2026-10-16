@@ -1,5 +1,8 @@
 package main.java.Recipe;
 
+import main.java.AI.RecipeAIService;
+import main.java.Util.JsonUtil;
+
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -11,25 +14,21 @@ import java.util.Set;
 
 /**
  * 食材名の表記ゆれ(同じ食材が違う書き方で複数登録されている状態)を
- * AIに検出させ、正規名へ統一するためのドメイン処理。
+ * AIに検出させ、正規名へ統一するためのドメイン処理をするクラス
  *
- * 役割は3つ:
- *  1. {@link #buildPrompt(List)} … AIへ送る検出プロンプトを組み立てる
- *  2. {@link #parseGroups(String)} … AIが返したJSONを {@link VariantGroup} のリストへ変換する
- *  3. {@link #apply(List, IngredientMaster, AllRecipeList)} … 検出結果を食材マスタとレシピへ反映する
- *
- * AIの呼び出し自体は {@code RecipeAIService.detectIngredientVariants} が担当する。
- * (本クラスはAI実装に依存せず、文字列の入出力だけを扱う)
+ *  {@link #detectVariants(RecipeAIService, List)}->検出プロンプトをAIへ送り、返ったJSONを {@link VariantGroup} のリストへ変換する
+ *  {@link #filterExisting(List, IngredientMaster)}->マスタに実在する食材名だけに絞り込む(確認画面の表示用)
+ *  {@link #apply(List, IngredientMaster, AllRecipeList)}->検出結果を食材マスタとレシピへ反映する
  */
 public final class IngredientNormalizer {
 
     /**
-     * 1つの表記ゆれグループ。{@code canonical} に統一し、{@code variants} を吸収する。
+     * 1つの表記ゆれグループ。{@code canonical} に統一し、{@code variants} を吸収する
      */
     public static final class VariantGroup {
         /** 統一後の正規名 */
         public final String canonical;
-        /** canonical に統一すべき別表記の一覧(canonical 自身は含めない) */
+        /** canonical に統一すべき別表記の一覧 */
         public final List<String> variants;
 
         /**
@@ -62,12 +61,22 @@ public final class IngredientNormalizer {
     private IngredientNormalizer() {}
 
     /**
-     * 表記ゆれ検出用のプロンプトを組み立てる。
-     * 既存の食材名リストだけを対象とし、正規名は必ずリスト内の表記から選ばせる。
-     * @param names 現在登録されている全食材名
-     * @return AIへ送るプロンプト
+     * AIに食材名の表記ゆれグループを検出させるメソッド
+     * @param ai    設定済みのAIサービス
+     * @param names 現在登録されている全ての食材名
+     * @return 表記ゆれグループのリスト(表記ゆれが無ければ空)
+     * @throws Exception AI呼び出し失敗時 / AI未設定時
      */
-    public static String buildPrompt(List<String> names) {
+    public static List<VariantGroup> detectVariants(RecipeAIService ai, List<String> names) throws Exception {
+        return parseGroups(ai.chat(buildPrompt(names)));
+    }
+
+    /**
+     * 表記ゆれ検出用のプロンプトを組み立てるメソッド
+     * @param names 現在登録されている全ての食材名
+     * @return プロンプト
+     */
+    private static String buildPrompt(List<String> names) {
         StringBuilder sb = new StringBuilder();
         sb.append("あなたは日本の料理データを整理する専門家です。\n");
         sb.append("以下は食材マスタに登録されている食材名の一覧です。\n");
@@ -91,72 +100,68 @@ public final class IngredientNormalizer {
     }
 
     /**
-     * AIが返したJSON文字列を {@link VariantGroup} のリストへ変換する。
+     * AIが返したJSON文字列を {@link VariantGroup} のリストへ変換する
      * 期待形式: {@code {"groups":[{"canonical":"..","variants":["..",".."]}]}}。
      * 解析できない/groups が無い場合は空リストを返す。
-     * @param json AIの応答(クリーンなJSON文字列)
-     * @return 表記ゆれグループのリスト(空可)
+     * @param json AIからの回答
+     * @return 表記ゆれグループのリスト
      */
-    public static List<VariantGroup> parseGroups(String json) {
+    private static List<VariantGroup> parseGroups(String json) {
         List<VariantGroup> result = new ArrayList<>();
-        if (json == null) return result;
-
-        int gIdx = json.indexOf("\"groups\"");
-        if (gIdx < 0) return result;
-        int arrStart = json.indexOf("[", gIdx);
-        if (arrStart < 0) return result;
-        int arrEnd = findMatchingBracket(json, arrStart, '[', ']');
-        if (arrEnd < 0) return result;
-
-        int pos = arrStart + 1;
-        while (pos < arrEnd) {
-            int objStart = json.indexOf('{', pos);
-            if (objStart < 0 || objStart >= arrEnd) break;
-            int objEnd = findMatchingBracket(json, objStart, '{', '}');
-            if (objEnd < 0 || objEnd > arrEnd) break;
-
-            String obj = json.substring(objStart, objEnd + 1);
-            String canonical = extractString(obj, "canonical");
-            List<String> variants = extractStringArray(obj, "variants");
-            if (canonical != null && !canonical.isEmpty() && !variants.isEmpty()) {
-                result.add(new VariantGroup(canonical, variants));
+        for (String obj : JsonUtil.extractObjectArray(json, "groups")) {
+            String canonical = JsonUtil.extractString(obj, "canonical");
+            List<String> variants = new ArrayList<>();
+            for (String v : JsonUtil.extractStringArray(obj, "variants")) variants.add(v.trim());
+            if (canonical != null && !canonical.trim().isEmpty() && !variants.isEmpty()) {
+                result.add(new VariantGroup(canonical.trim(), variants));
             }
-            pos = objEnd + 1;
         }
         return result;
     }
 
     /**
-     * 検出結果を食材マスタとレシピへ反映する。
-     * 1) マスタ: 各 variant を削除し、canonical に集約(順序は維持)
-     * 2) レシピ: variant を使っているレシピの食材名を canonical へ置換(重複は除去)
-     * AIの幻覚に備え、canonical も variant も「現在マスタに存在する名前」のみ採用する。
+     * AIが返したグループを、現在のマスタに実在する食材名だけに絞り込むメソッド
+     * canonical が実在しないグループと、実在しない/canonical と同じ別表記は除外する
+     * @param groups AIが検出した表記ゆれグループ
+     * @param master 食材マスタ
+     * @return 統一を適用できるグループのリスト(別表記が1つも残らないグループは含まない)
+     */
+    public static List<VariantGroup> filterExisting(List<VariantGroup> groups, IngredientMaster master) {
+        Set<String> existing = new HashSet<>();
+        for (Ingredient ing : master.getAllIngredients()) existing.add(ing.getName());
+
+        List<VariantGroup> result = new ArrayList<>();
+        for (VariantGroup g : groups) {
+            if (g.canonical == null || !existing.contains(g.canonical)) continue;
+            List<String> variants = new ArrayList<>();
+            for (String v : g.variants) {
+                if (v != null && existing.contains(v) && !v.equals(g.canonical) && !variants.contains(v)) {
+                    variants.add(v);
+                }
+            }
+            if (!variants.isEmpty()) result.add(new VariantGroup(g.canonical, variants));
+        }
+        return result;
+    }
+
+    /**
+     * 検出結果を食材マスタとレシピへ反映するメソッド
      * @param groups     AIが検出した表記ゆれグループ
      * @param master     食材マスタ
      * @param recipeList 全レシピ
-     * @return 適用結果(統合数・更新レシピ数)
+     * @return 適用結果
      */
     public static ApplyResult apply(List<VariantGroup> groups, IngredientMaster master, AllRecipeList recipeList) {
-        List<Ingredient> current = master.getAllIngredients();
-        Set<String> existing = new HashSet<>();
-        for (Ingredient ing : current) existing.add(ing.getName());
-
-        // variant -> canonical のマップを、実在する名前だけで構築
+        // variant -> canonical のマップを、実在する名前だけで構築(重複指定は先勝ち)
         Map<String, String> toCanonical = new LinkedHashMap<>();
-        for (VariantGroup g : groups) {
-            if (g.canonical == null || !existing.contains(g.canonical)) continue;
-            for (String v : g.variants) {
-                if (v == null) continue;
-                String name = v.trim();
-                if (name.isEmpty() || name.equals(g.canonical)) continue;
-                if (!existing.contains(name)) continue;       // 実在しない別表記は無視
-                if (toCanonical.containsKey(name)) continue;   // 重複指定はスキップ
-                toCanonical.put(name, g.canonical);
-            }
+        for (VariantGroup g : filterExisting(groups, master)) {
+            for (String v : g.variants) toCanonical.putIfAbsent(v, g.canonical);
         }
         if (toCanonical.isEmpty()) return new ApplyResult(0, 0);
 
-        // === 1. マスタを再構築(variant を畳み込み、順序を維持) ===
+        List<Ingredient> current = master.getAllIngredients();
+
+        // マスタを再構築
         Map<String, Ingredient> byName = new HashMap<>();
         for (Ingredient ing : current) byName.put(ing.getName(), ing);
 
@@ -165,19 +170,20 @@ public final class IngredientNormalizer {
         for (Ingredient ing : current) {
             String name = ing.getName();
             String canon = toCanonical.getOrDefault(name, name);
-            if (!added.add(canon)) continue; // 既に追加済み(canonical重複)はスキップ
+            if (!added.add(canon)) continue; // 追加済みはスキップ
             Ingredient canonIng = byName.get(canon);
             rebuilt.add(canonIng != null ? canonIng : new Ingredient(canon, ing.getCategory()));
         }
         master.replaceAll(rebuilt);
 
-        // === 2. レシピの食材名を置換 ===
+        // レシピの食材名を置換
         Map<String, Ingredient> masterAfter = new HashMap<>();
         for (Ingredient ing : master.getAllIngredients()) masterAfter.put(ing.getName(), ing);
 
         int updatedRecipes = 0;
         for (Recipe r : new ArrayList<>(recipeList.getRecipeList())) {
             ArrayList<Ingredient> newIngs = new ArrayList<>();
+            Map<String, Quantity> newQuantities = new HashMap<>();
             Set<String> seen = new HashSet<>();
             boolean changed = false;
             for (Ingredient ing : r.getIngredients()) {
@@ -185,15 +191,16 @@ public final class IngredientNormalizer {
                 String canon = toCanonical.getOrDefault(name, name);
                 if (!canon.equals(name)) changed = true;
                 if (!seen.add(canon)) {
-                    changed = true; // 同一レシピ内で重複する食材になったので除去
+                    changed = true; // 同一レシピ内で重複する食材になったので除去(分量は先に出てきた方を残す)
                     continue;
                 }
                 Ingredient resolved = masterAfter.get(canon);
                 newIngs.add(resolved != null ? resolved : new Ingredient(canon, ing.getCategory()));
+                newQuantities.put(canon, r.getQuantity(ing));
             }
             if (changed) {
                 EnumSet<RecipeCategory> cats = r.getCategories();
-                Recipe updated = new Recipe(r.getTitle(), r.getUrl(), newIngs, cats);
+                Recipe updated = new Recipe(r.getTitle(), r.getUrl(), newIngs, newQuantities, cats);
                 updated.setId(r.getId());
                 recipeList.updateRecipe(updated);
                 updatedRecipes++;
@@ -201,134 +208,5 @@ public final class IngredientNormalizer {
         }
 
         return new ApplyResult(toCanonical.size(), updatedRecipes);
-    }
-
-    // ---- 簡易JSONパーサ(本プロジェクトの他クラスと同様、外部ライブラリ非依存) ----
-
-    /**
-     * "key":"value" 形式の文字列値を抽出する(unescape済みで返す)。
-     * @param obj 対象JSON
-     * @param key キー名
-     * @return 値。見つからなければ null
-     */
-    private static String extractString(String obj, String key) {
-        int keyIdx = obj.indexOf("\"" + key + "\"");
-        if (keyIdx < 0) return null;
-        int colon = obj.indexOf(":", keyIdx);
-        if (colon < 0) return null;
-        int valStart = obj.indexOf("\"", colon);
-        if (valStart < 0) return null;
-        valStart++;
-        int valEnd = findUnescapedQuote(obj, valStart);
-        if (valEnd < 0) return null;
-        return jsonUnescape(obj.substring(valStart, valEnd)).trim();
-    }
-
-    /**
-     * "key":["v1","v2",…] 形式の文字列配列を抽出する。
-     * @param obj 対象JSON
-     * @param key キー名
-     * @return 値リスト(キーが無ければ空)
-     */
-    private static List<String> extractStringArray(String obj, String key) {
-        List<String> items = new ArrayList<>();
-        int keyIdx = obj.indexOf("\"" + key + "\"");
-        if (keyIdx < 0) return items;
-        int arrStart = obj.indexOf("[", keyIdx);
-        if (arrStart < 0) return items;
-        int arrEnd = findMatchingBracket(obj, arrStart, '[', ']');
-        if (arrEnd < 0) return items;
-        int pos = arrStart + 1;
-        while (pos < arrEnd) {
-            int strStart = obj.indexOf("\"", pos);
-            if (strStart < 0 || strStart >= arrEnd) break;
-            int strEnd = findUnescapedQuote(obj, strStart + 1);
-            if (strEnd < 0 || strEnd > arrEnd) break;
-            items.add(jsonUnescape(obj.substring(strStart + 1, strEnd)).trim());
-            pos = strEnd + 1;
-        }
-        return items;
-    }
-
-    /**
-     * pos 以降でエスケープされていない最初の '"' を探す。
-     * @param s   走査文字列
-     * @param pos 開始位置
-     * @return 位置。見つからなければ -1
-     */
-    private static int findUnescapedQuote(String s, int pos) {
-        while (pos < s.length()) {
-            char c = s.charAt(pos);
-            if (c == '\\') { pos += 2; continue; }
-            if (c == '"') return pos;
-            pos++;
-        }
-        return -1;
-    }
-
-    /**
-     * 開き括弧に対応する閉じ括弧を、文字列リテラルを除外して探す。
-     * @param s     走査文字列
-     * @param start 開き括弧の位置
-     * @param open  開き括弧文字
-     * @param close 閉じ括弧文字
-     * @return 対応する閉じ括弧の位置。見つからなければ -1
-     */
-    private static int findMatchingBracket(String s, int start, char open, char close) {
-        int depth = 0;
-        boolean inString = false;
-        for (int i = start; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (inString) {
-                if (c == '\\') { i++; continue; }
-                if (c == '"') inString = false;
-                continue;
-            }
-            if (c == '"') { inString = true; continue; }
-            if (c == open) depth++;
-            else if (c == close) {
-                depth--;
-                if (depth == 0) return i;
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * JSON文字列値内のエスケープを実体へ戻す。
-     * @param s エスケープされた文字列
-     * @return 復元後の文字列
-     */
-    private static String jsonUnescape(String s) {
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '\\' && i + 1 < s.length()) {
-                char next = s.charAt(i + 1);
-                switch (next) {
-                    case '\\': sb.append('\\'); i++; break;
-                    case '"':  sb.append('"');  i++; break;
-                    case '/':  sb.append('/');  i++; break;
-                    case 'n':  sb.append('\n'); i++; break;
-                    case 'r':  sb.append('\r'); i++; break;
-                    case 't':  sb.append('\t'); i++; break;
-                    case 'b':  sb.append('\b'); i++; break;
-                    case 'f':  sb.append('\f'); i++; break;
-                    case 'u':
-                        if (i + 5 < s.length()) {
-                            try {
-                                int code = Integer.parseInt(s.substring(i + 2, i + 6), 16);
-                                sb.append((char) code);
-                                i += 5;
-                            } catch (NumberFormatException e) { sb.append(c); }
-                        } else sb.append(c);
-                        break;
-                    default: sb.append(c);
-                }
-            } else {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
     }
 }

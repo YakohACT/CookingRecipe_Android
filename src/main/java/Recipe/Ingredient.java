@@ -3,8 +3,7 @@ package main.java.Recipe;
 import java.util.Objects;
 
 /**
- * 食材データを管理するクラス。
- * 永続化は SQLite + database.csv 経由で行うため Java シリアライゼーションは不要。
+ * 食材データを管理するクラス
  */
 public class Ingredient {
     private String name;
@@ -21,24 +20,26 @@ public class Ingredient {
     }
 
     /**
+     * 食材名のゲッター
      * @return 食材名
      */
     public String getName() { return name; }
 
     /**
+     * カテゴリーのゲッター
      * @return 食材カテゴリー
      */
     public IngredientCategory getCategory() { return category; }
 
     /**
-     * リスト表示時にラベル文字列として食材名をそのまま返す。
+     * リスト表示時にラベル文字列として食材名をそのまま返すメソッド
      * @return 食材名
      */
     @Override
     public String toString() { return name; }
 
     /**
-     * 名前のみで等価判定する(カテゴリーが違っても同じ名前なら同一とみなす)。
+     * 名前のみで等価判定するメソッド(カテゴリーが違っても同じ名前なら同一とみなす)
      * @param o 比較対象オブジェクト
      * @return 名前が一致すれば true
      */

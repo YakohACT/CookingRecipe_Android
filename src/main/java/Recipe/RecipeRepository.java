@@ -14,14 +14,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * SQLite を使ってレシピを永続化するリポジトリ。
- * 3テーブル構成:
+ * SQLiteを使ってレシピ保存するクラス
+ * テーブル構成:
  * - recipes(id, title, url)
  * - recipe_categories(recipe_id, category)  ※ enum 名(英語)を保存
- * - recipe_ingredients(recipe_id, ingredient_name, sort_order)
+ * - recipe_ingredients(recipe_id, ingredient_name, sort_order, amount, unit)
  *
- * Android 版では JDBC ではなく Android 標準の {@link SQLiteDatabase} を使用する。
- * スキーマ・テーブル構成はデスクトップ版と同一のため、recipes.db はそのまま互換。
+ * Android 版では sqlite-jdbc ではなく Android 標準の {@link SQLiteDatabase} を使う。
+ * スキーマはデスクトップ版と同一のため、recipes.db はそのまま互換
  */
 public class RecipeRepository {
 
@@ -29,7 +29,7 @@ public class RecipeRepository {
     private final IngredientMaster ingredientMaster;
 
     /**
-     * 指定パスのSQLiteを開き、必要ならテーブルを作成する。
+     * 指定パスのSQLiteを開き、必要ならテーブルを作成するメソッド
      * @param dbPath           SQLite データベースファイルのパス
      * @param ingredientMaster 読み込み時に食材名を解決するためのマスタ
      */
@@ -38,13 +38,12 @@ public class RecipeRepository {
         this.ingredientMaster = ingredientMaster;
         ensureSchema();
         // 実体ファイルが分かりにくいため、絶対パスをログに表示する
-        System.out.println("[main.java.Recipe.RecipeRepository] SQLite DB: " + new File(dbPath).getAbsolutePath());
+        System.out.println("[RecipeRepository] SQLite DB: " + new File(dbPath).getAbsolutePath());
     }
 
     /**
-     * recipes.db の保存先を返す。
+     * recipes.db の保存先を返すメソッド
      * Android ではアプリ専用のデータベースディレクトリ固定
-     * (デスクトップ版のようなカレントディレクトリ探索は行わない)。
      * @return recipes.db の絶対パス
      */
     public static String resolveDbPath() {
@@ -55,19 +54,22 @@ public class RecipeRepository {
     }
 
     /**
-     * SQLite データベースを開く(存在しなければ作成)。
+     * SQLite を開くメソッド(存在しなければ作成する)
+     * SQLite の外部キー制約(ON DELETE CASCADE)は接続ごとに有効化が必要なため、毎回 ON で開く
      * @return 開いた状態のデータベース(呼び出し側で close すること)
      */
     private SQLiteDatabase connect() {
-        return SQLiteDatabase.openOrCreateDatabase(dbPath, null);
+        SQLiteDatabase db = SQLiteDatabase.openOrCreateDatabase(dbPath, null);
+        db.setForeignKeyConstraintsEnabled(true);
+        return db;
     }
 
     /**
-     * 必要な3テーブル(recipes / recipe_categories / recipe_ingredients)を冪等に作成する。
+     * 必要な3テーブル(recipes / recipe_categories / recipe_ingredients)を作成するメソッド
+     * 分量の列(amount / unit)が無い古いDBには列を追加する
      */
     private void ensureSchema() {
         try (SQLiteDatabase db = connect()) {
-            db.execSQL("PRAGMA foreign_keys = ON");
             db.execSQL(
                     "CREATE TABLE IF NOT EXISTS recipes (" +
                     "  id INTEGER PRIMARY KEY AUTOINCREMENT," +
@@ -86,17 +88,40 @@ public class RecipeRepository {
                     "  recipe_id       INTEGER NOT NULL," +
                     "  ingredient_name TEXT NOT NULL," +
                     "  sort_order      INTEGER NOT NULL," +
+                    "  amount          TEXT NOT NULL DEFAULT ''," +
+                    "  unit            TEXT NOT NULL DEFAULT ''," +
                     "  PRIMARY KEY (recipe_id, sort_order)," +
                     "  FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE" +
                     ")");
+            addQuantityColumnsIfMissing(db);
         } catch (Exception e) {
             throw new RuntimeException("SQLiteの初期化に失敗しました: " + e.getMessage(), e);
         }
     }
 
     /**
-     * 全レシピを読み込む。カテゴリーと食材は別テーブルから結合して復元する。
-     * @return 全レシピのリスト(順序は recipes テーブルの id 昇順)
+     * 分量の列が追加される前に作られた recipe_ingredients に amount / unit 列を追加するメソッド
+     * 既存の行は分量なし(空文字)になる
+     * @param db データベース
+     */
+    private void addQuantityColumnsIfMissing(SQLiteDatabase db) {
+        boolean hasAmount = false;
+        boolean hasUnit = false;
+        try (Cursor c = db.rawQuery("PRAGMA table_info(recipe_ingredients)", null)) {
+            int nameCol = c.getColumnIndexOrThrow("name");
+            while (c.moveToNext()) {
+                String column = c.getString(nameCol);
+                if ("amount".equals(column)) hasAmount = true;
+                if ("unit".equals(column)) hasUnit = true;
+            }
+        }
+        if (!hasAmount) db.execSQL("ALTER TABLE recipe_ingredients ADD COLUMN amount TEXT NOT NULL DEFAULT ''");
+        if (!hasUnit) db.execSQL("ALTER TABLE recipe_ingredients ADD COLUMN unit TEXT NOT NULL DEFAULT ''");
+    }
+
+    /**
+     * 全レシピを読み込む。カテゴリーと食材は別テーブルから結合して復元するメソッド
+     * @return 全レシピのリスト
      */
     public List<Recipe> findAll() {
         Map<Long, RecipeBuilder> builders = new LinkedHashMap<>();
@@ -121,11 +146,15 @@ public class RecipeRepository {
             }
 
             try (Cursor c = db.rawQuery(
-                    "SELECT recipe_id, ingredient_name FROM recipe_ingredients ORDER BY recipe_id, sort_order", null)) {
+                    "SELECT recipe_id, ingredient_name, amount, unit FROM recipe_ingredients ORDER BY recipe_id, sort_order", null)) {
                 while (c.moveToNext()) {
                     RecipeBuilder b = builders.get(c.getLong(0));
                     if (b == null) continue;
-                    b.ingredients.add(lookupIngredient(c.getString(1)));
+                    // マスタに無い食材名は OTHER で自動追加(database.csv にも書き込む)
+                    Ingredient ing = ingredientMaster.addIngredient(c.getString(1));
+                    if (ing == null) continue;
+                    b.ingredients.add(ing);
+                    b.quantities.put(ing.getName(), Quantity.of(c.getString(2), c.getString(3)));
                 }
             }
         } catch (Exception e) {
@@ -134,9 +163,8 @@ public class RecipeRepository {
 
         List<Recipe> result = new ArrayList<>();
         for (RecipeBuilder b : builders.values()) {
-            EnumSet<RecipeCategory> cats = b.categories.isEmpty()
-                    ? EnumSet.of(RecipeCategory.OTHER) : b.categories;
-            Recipe r = new Recipe(b.title, b.url, b.ingredients, cats);
+            // カテゴリーが空の場合は Recipe 側で OTHER になる
+            Recipe r = new Recipe(b.title, b.url, b.ingredients, b.quantities, b.categories);
             r.setId(b.id);
             result.add(r);
         }
@@ -144,8 +172,7 @@ public class RecipeRepository {
     }
 
     /**
-     * レシピを新規挿入し、生成された id を返す。
-     * カテゴリー・食材は1トランザクション内で関連テーブルにも挿入する。
+     * レシピを新規挿入し、生成された id を返すメソッド
      * @param recipe 保存するレシピ(id は無視される)
      * @return 自動採番された id
      */
@@ -158,8 +185,7 @@ public class RecipeRepository {
                 cv.put("url", recipe.getUrl());
                 long id = db.insertOrThrow("recipes", null, cv);
 
-                insertRelations(db, id, recipe);
-
+                insertChildren(db, id, recipe);
                 db.setTransactionSuccessful();
                 return id;
             } finally {
@@ -171,27 +197,28 @@ public class RecipeRepository {
     }
 
     /**
-     * 既存レシピを更新する。タイトル/URLは UPDATE、関連テーブル(カテゴリー・食材)は
-     * 全削除してから再挿入することで内容差分を反映する。1トランザクションで原子的に行う。
+     * 既存レシピを更新するメソッド
      * @param recipe 同じ id を持つ更新後のレシピ
-     * @throws IllegalArgumentException recipe.getId() が 0 以下のとき
+     * @throws IllegalArgumentException recipe.getId()が0以下のとき
      */
     public void update(Recipe recipe) {
         long id = recipe.getId();
         if (id <= 0) {
-            throw new IllegalArgumentException("main.java.Recipe.Recipe has no id; use insert() instead");
+            throw new IllegalArgumentException("Recipe has no id; use insert() instead");
         }
+        String[] idArg = {String.valueOf(id)};
         try (SQLiteDatabase db = connect()) {
             db.beginTransaction();
             try {
                 ContentValues cv = new ContentValues();
                 cv.put("title", recipe.getTitle());
                 cv.put("url", recipe.getUrl());
-                db.update("recipes", cv, "id = ?", new String[]{String.valueOf(id)});
+                db.update("recipes", cv, "id = ?", idArg);
 
-                db.delete("recipe_categories", "recipe_id = ?", new String[]{String.valueOf(id)});
-                db.delete("recipe_ingredients", "recipe_id = ?", new String[]{String.valueOf(id)});
-                insertRelations(db, id, recipe);
+                // カテゴリーと食材は一旦消してから入れ直す
+                db.delete("recipe_categories", "recipe_id = ?", idArg);
+                db.delete("recipe_ingredients", "recipe_id = ?", idArg);
+                insertChildren(db, id, recipe);
 
                 db.setTransactionSuccessful();
             } finally {
@@ -203,63 +230,43 @@ public class RecipeRepository {
     }
 
     /**
-     * 指定 id のレシピを削除する。関連テーブルも明示的に消す
-     * (foreign_keys プラグマが接続毎の設定のため CASCADE に頼らない)。
-     * @param id 削除対象レシピのDB主キー
-     */
-    public void delete(long id) {
-        try (SQLiteDatabase db = connect()) {
-            db.beginTransaction();
-            try {
-                db.delete("recipe_categories", "recipe_id = ?", new String[]{String.valueOf(id)});
-                db.delete("recipe_ingredients", "recipe_id = ?", new String[]{String.valueOf(id)});
-                db.delete("recipes", "id = ?", new String[]{String.valueOf(id)});
-                db.setTransactionSuccessful();
-            } finally {
-                db.endTransaction();
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("レシピの削除に失敗: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * カテゴリー・食材の関連テーブルへ1レシピ分を挿入する(insert / update 共通処理)。
+     * レシピのカテゴリーと食材を子テーブルへ挿入するメソッド(insert / update 共通)
      * @param db     トランザクション中のデータベース
-     * @param id     レシピの主キー
-     * @param recipe 挿入するレシピ
+     * @param id     親レシピのDBキー
+     * @param recipe 保存するレシピ
      */
-    private static void insertRelations(SQLiteDatabase db, long id, Recipe recipe) {
+    private void insertChildren(SQLiteDatabase db, long id, Recipe recipe) {
         for (RecipeCategory cat : recipe.getCategories()) {
             ContentValues cv = new ContentValues();
             cv.put("recipe_id", id);
             cv.put("category", cat.name());
             db.insertOrThrow("recipe_categories", null, cv);
         }
+
         int order = 0;
         for (Ingredient ing : recipe.getIngredients()) {
+            Quantity q = recipe.getQuantity(ing);
             ContentValues cv = new ContentValues();
             cv.put("recipe_id", id);
             cv.put("ingredient_name", ing.getName());
             cv.put("sort_order", order++);
+            cv.put("amount", q.getAmount());
+            cv.put("unit", q.getUnit());
             db.insertOrThrow("recipe_ingredients", null, cv);
         }
     }
 
     /**
-     * 食材名から {@link IngredientMaster} を引いて {@link Ingredient} を返す。
-     * マスタに存在しない場合は OTHER カテゴリで自動的にマスタ + database.csv に追加し、
-     * その Ingredient を返す。
-     * @param name 食材名
-     * @return 解決された Ingredient
+     * 指定 id のレシピを削除するメソッド
+     * recipe_categories / recipe_ingredients の行は ON DELETE CASCADE で一緒に削除される
+     * @param id 削除対象レシピのDBキー
      */
-    private Ingredient lookupIngredient(String name) {
-        for (Ingredient ing : ingredientMaster.getAllIngredients()) {
-            if (ing.getName().equals(name)) return ing;
+    public void delete(long id) {
+        try (SQLiteDatabase db = connect()) {
+            db.delete("recipes", "id = ?", new String[]{String.valueOf(id)});
+        } catch (Exception e) {
+            throw new RuntimeException("レシピの削除に失敗: " + e.getMessage(), e);
         }
-        // マスタに無い場合は OTHER で自動追加(database.csv にも書き込む)
-        Ingredient added = ingredientMaster.addIngredient(name);
-        return (added != null) ? added : new Ingredient(name, IngredientCategory.OTHER);
     }
 
     /** 読み込み中の中間状態を保持する内部Builder */
@@ -268,10 +275,11 @@ public class RecipeRepository {
         final String title;
         final String url;
         final ArrayList<Ingredient> ingredients = new ArrayList<>();
+        final Map<String, Quantity> quantities = new LinkedHashMap<>();
         final EnumSet<RecipeCategory> categories = EnumSet.noneOf(RecipeCategory.class);
 
         /**
-         * @param id    DB主キー
+         * @param id    DBのIDキー
          * @param title レシピ名
          * @param url   参照URL
          */

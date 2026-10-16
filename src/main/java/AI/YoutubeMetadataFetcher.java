@@ -1,10 +1,12 @@
 package main.java.AI;
 
+import main.java.Util.JsonUtil;
+
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -14,7 +16,7 @@ import java.util.regex.Pattern;
 
 /**
  * YouTube の動画メタデータ(タイトル + 字幕)をテキスト化するヘルパー。
- * Ollama や OpenAI など動画自体を見られないモデル向けに、
+ * Ollama / llama.cpp や OpenAI など動画自体を見られないモデル向けに、
  * AIプロンプトへ「テキスト化された動画コンテンツ」を注入するために使う。
  *
  * 取得方法:
@@ -29,25 +31,18 @@ public final class YoutubeMetadataFetcher {
     private static final int CONNECT_TIMEOUT_MS = 5000;
     private static final int READ_TIMEOUT_MS = 8000;
     private static final int MAX_TRANSCRIPT_LENGTH = 4000;
+    /** 概要欄がこの文字数未満なら情報不足とみなして Whisper 起動を許可する(URLは除外して数える) */
+    private static final int DESCRIPTION_SUFFICIENT_THRESHOLD = 150;
 
     private YoutubeMetadataFetcher() {}
 
     /**
-     * 動画タイトルと字幕をひとつのテキストブロックにまとめて返す。
-     * 失敗時/取得不能時は空文字。
-     * @param url YouTubeの任意形式URL
-     * @return 「【動画タイトル】… 【動画字幕(抜粋)】…」形式のテキスト(空文字あり)
+     * URLが YouTube の動画リンクかどうかを判定する。
+     * @param url 判定対象のURL(null可)
+     * @return youtube.com / youtu.be のURLなら true
      */
-    /** 概要欄がこの文字数未満なら情報不足とみなして Whisper 起動を許可する(URLは除外して数える) */
-    private static final int DESCRIPTION_SUFFICIENT_THRESHOLD = 150;
-
-    /**
-     * 後方互換用。食材名リストを渡せない呼び出しでは食材検出を行わず文字数のみで判定する。
-     * @param url YouTube URL
-     * @return 整形済みのテキスト(タイトル・概要欄・字幕の連結)
-     */
-    public static String fetchSummary(String url) {
-        return fetchSummary(url, java.util.Collections.emptyList());
+    static boolean isYoutubeUrl(String url) {
+        return url != null && (url.contains("youtube.com") || url.contains("youtu.be"));
     }
 
     /**
@@ -148,12 +143,8 @@ public final class YoutubeMetadataFetcher {
     private static String extractDescription(String html) {
         if (html == null || html.isEmpty()) return "";
         // ytInitialPlayerResponse 内の "shortDescription":"..." を探す
-        int idx = html.indexOf("\"shortDescription\":\"");
-        if (idx < 0) return "";
-        int valStart = idx + "\"shortDescription\":\"".length();
-        int valEnd = findUnescapedQuote(html, valStart);
-        if (valEnd < 0 || valEnd <= valStart) return "";
-        return jsonUnescape(html.substring(valStart, valEnd)).trim();
+        String description = JsonUtil.extractString(html, "shortDescription");
+        return description == null ? "" : description.trim();
     }
 
     /**
@@ -202,7 +193,7 @@ public final class YoutubeMetadataFetcher {
      * @param url 解析対象のURL
      * @return 動画ID。抽出できなければ null
      */
-    private static String extractVideoId(String url) {
+    static String extractVideoId(String url) {
         if (url == null) return null;
         Matcher m;
         m = Pattern.compile("youtu\\.be/([A-Za-z0-9_-]{6,})").matcher(url);
@@ -224,16 +215,10 @@ public final class YoutubeMetadataFetcher {
     private static String fetchTitle(String videoUrl) {
         try {
             String oembedUrl = "https://www.youtube.com/oembed?format=json&url="
-                    + URLEncoder.encode(videoUrl, StandardCharsets.UTF_8);
+                    + URLEncoder.encode(videoUrl, "UTF-8");
             String json = httpGet(oembedUrl, "application/json");
-            if (json.isEmpty()) return "";
-            int keyIdx = json.indexOf("\"title\"");
-            if (keyIdx == -1) return "";
-            int colonIdx = json.indexOf(":", keyIdx);
-            int valStart = json.indexOf("\"", colonIdx) + 1;
-            int valEnd = findUnescapedQuote(json, valStart);
-            if (valEnd <= valStart) return "";
-            return jsonUnescape(json.substring(valStart, valEnd));
+            String title = JsonUtil.extractString(json, "title");
+            return title == null ? "" : title;
         } catch (Exception e) {
             return "";
         }
@@ -275,7 +260,7 @@ public final class YoutubeMetadataFetcher {
      * @throws Exception 通信失敗時
      */
     private static String httpGet(String url, String accept) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
         conn.setRequestMethod("GET");
         conn.setRequestProperty("User-Agent", "Mozilla/5.0 (compatible; RecipeManager/1.0)");
         conn.setRequestProperty("Accept", accept);
@@ -292,57 +277,5 @@ public final class YoutubeMetadataFetcher {
             while ((line = br.readLine()) != null) sb.append(line).append("\n");
             return sb.toString();
         }
-    }
-
-    /**
-     * pos 以降でエスケープされていない最初の '"' を探す。
-     * @param s   検索対象
-     * @param pos 開始位置
-     * @return マッチ位置。見つからなければ -1
-     */
-    private static int findUnescapedQuote(String s, int pos) {
-        while (pos < s.length()) {
-            char c = s.charAt(pos);
-            if (c == '\\') { pos += 2; continue; }
-            if (c == '"') return pos;
-            pos++;
-        }
-        return -1;
-    }
-
-    /**
-     * バックスラッシュ系のJSONエスケープ(quote, slash, n, t, ユニコード4桁等)を実体に戻す。
-     * @param s エスケープされたJSON文字列値
-     * @return 復元された文字列
-     */
-    private static String jsonUnescape(String s) {
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '\\' && i + 1 < s.length()) {
-                char next = s.charAt(i + 1);
-                switch (next) {
-                    case '\\': sb.append('\\'); i++; break;
-                    case '"':  sb.append('"');  i++; break;
-                    case '/':  sb.append('/');  i++; break;
-                    case 'n':  sb.append('\n'); i++; break;
-                    case 'r':  sb.append('\r'); i++; break;
-                    case 't':  sb.append('\t'); i++; break;
-                    case 'u':
-                        if (i + 5 < s.length()) {
-                            try {
-                                int code = Integer.parseInt(s.substring(i + 2, i + 6), 16);
-                                sb.append((char) code);
-                                i += 5;
-                            } catch (NumberFormatException e) { sb.append(c); }
-                        } else { sb.append(c); }
-                        break;
-                    default: sb.append(c);
-                }
-            } else {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
     }
 }

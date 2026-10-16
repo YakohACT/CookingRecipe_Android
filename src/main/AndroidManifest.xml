@@ -4,17 +4,24 @@
     <!-- AI API / レシピページ取得のためネットワークアクセスが必要 -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+      usesCleartextTraffic: LAN 上の Ollama / llama-server (http://) へ接続するために許可
+      configChanges: 画面回転やキーボード接続で Activity が作り直されて入力中の内容が消えないようにする
+                     (uiMode は含めない。ライト/ダーク切替時は作り直してテーマ色を反映する)
+    -->
     <application
         android:name="main.java.App"
         android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"
         android:allowBackup="true"
         android:usesCleartextTraffic="true">
-        <!-- usesCleartextTraffic: ローカルネットワーク上の Ollama (http://) へ接続するために許可 -->
 
         <activity
             android:name="main.java.MainActivity"
             android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

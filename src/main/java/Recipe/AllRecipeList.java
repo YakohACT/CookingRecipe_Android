@@ -3,8 +3,8 @@ package main.java.Recipe;
 import java.util.ArrayList;
 
 /**
- * 全レシピをメモリに保持し、SQLite と同期させるクラス。
- * add/delete は即時SQLに反映するため write() の呼び出しは不要(no-op として残置)。
+ * 全レシピをメモリに保持し、SQLite と同期させるクラス
+ * add/delete は即時SQLに反映
  */
 public class AllRecipeList {
 
@@ -12,8 +12,8 @@ public class AllRecipeList {
     private ArrayList<Recipe> recipeList;
 
     /**
-     * リポジトリを初期化し、起動時に SQLite から全レシピを読み込む。
-     * 読み込みに失敗してもアプリは起動できるよう、空のリストにフォールバックする。
+     * リポジトリを初期化し、起動時に SQLite から全レシピを読み込むメソッド
+     * 読み込みに失敗してもアプリは起動できるよう、空のリストにフォールバックする
      * @param ingredientMaster 食材名から Ingredient オブジェクトを解決するためのマスタ
      */
     public AllRecipeList(IngredientMaster ingredientMaster) {
@@ -28,8 +28,8 @@ public class AllRecipeList {
     }
 
     /**
-     * メモリ上のレシピリストを返す。
-     * @return レシピリスト(内部参照そのまま)
+     * レシピのリストのゲッター
+     * @return レシピリスト
      */
     public ArrayList<Recipe> getRecipeList() {
         return recipeList;
@@ -47,7 +47,7 @@ public class AllRecipeList {
     }
 
     /**
-     * 指定レシピを SQLite とメモリ上のリストの両方から削除する。
+     * 指定レシピを削除するメソッド
      * @param recipe 削除するレシピ
      */
     public void deleteRecipe(Recipe recipe) {
@@ -58,7 +58,7 @@ public class AllRecipeList {
     }
 
     /**
-     * 既存レシピを更新する。SQLiteと同期し、メモリ上のリストの該当エントリも差し替える。
+     * 既存レシピを更新するメソッド
      * @param recipe 同じ id を持つ更新後のレシピ
      */
     public void updateRecipe(Recipe recipe) {

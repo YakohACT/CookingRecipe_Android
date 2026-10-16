@@ -1,8 +1,11 @@
 package main.java.UI;
 
+import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
+import android.widget.AutoCompleteTextView;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -13,21 +16,29 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import main.java.MainActivity;
-import main.java.AI.RecipeAIService;
+import main.java.AI.RecipeSuggestion;
+import main.java.Recipe.BatchUrlImporter;
 import main.java.Recipe.Ingredient;
 import main.java.Recipe.IngredientCategory;
+import main.java.Recipe.Quantity;
 import main.java.Recipe.Recipe;
 import main.java.Recipe.RecipeCategory;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * レシピ登録/編集画面パネル（AI自動提案機能付き）。
- * editTarget が null なら新規登録、非nullなら既存レシピの更新として動作する。
- * (デスクトップ版 Swing パネルの Android View 置き換え)
+ * editTarget が null なら新規登録、非nullなら既存レシピの更新として動作する
+ * 使用する食材は一覧で管理し、食材ごとに数量と単位(分量)を入力できる
+ * (デスクトップ版 Swing パネルの Android View 置き換え。JTable の行は1行ずつの入力欄にしている)
  */
 public class RegisterRecipePanel extends ScrollView {
+
+    private static final String AI_BUTTON_LABEL = "✨ AI自動提案";
 
     private final MainActivity owner;
     private final Recipe editTarget;
@@ -35,9 +46,24 @@ public class RegisterRecipePanel extends ScrollView {
     private final EditText urlField;
     /** RecipeCategory.values() と同じ並びのチェックボックス */
     private final CheckBox[] categoryChecks = new CheckBox[RecipeCategory.values().length];
-    /** 現在選択されている食材(重複なし・順序保持) */
-    private final ArrayList<Ingredient> selectedIngredients = new ArrayList<>();
-    private final LinearLayout selectedContainer;
+    /** 使用する食材の行(食材 / 数量 / 単位) */
+    private final List<IngredientRow> rows = new ArrayList<>();
+    private final LinearLayout rowsContainer;
+
+    /** 使用する食材1行分の入力欄 */
+    private static final class IngredientRow {
+        final Ingredient ingredient;
+        final EditText amountField;
+        final AutoCompleteTextView unitField;
+        final View root;
+
+        IngredientRow(Ingredient ingredient, EditText amountField, AutoCompleteTextView unitField, View root) {
+            this.ingredient = ingredient;
+            this.amountField = amountField;
+            this.unitField = unitField;
+            this.root = root;
+        }
+    }
 
     /**
      * 新規登録モードで構築する。
@@ -65,34 +91,96 @@ public class RegisterRecipePanel extends ScrollView {
         addView(form, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // ===== ヘッダー(タイトル + AIボタン) =====
-        LinearLayout header = new LinearLayout(owner);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        TextView titleLabel = UIComponents.createTitleLabel(owner,
-                editTarget == null ? "新規レシピ登録" : "レシピ編集");
-        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        titleLp.gravity = android.view.Gravity.CENTER_VERTICAL;
-        header.addView(titleLabel, titleLp);
-        Button btnAi = UIComponents.createColoredButton(owner, "✨ AI自動提案", Theme.COLOR_AI);
-        header.addView(btnAi);
-        form.addView(header);
+        Button btnAi = UIComponents.createAiButton(owner, AI_BUTTON_LABEL);
+        form.addView(buildHeader(btnAi));
+        UIComponents.addSpacer(form, 12);
 
-        // ===== タイトル / URL 入力 =====
+        // ===== タイトル / URL =====
         form.addView(UIComponents.createLabel(owner, "タイトル:"));
         titleField = UIComponents.createStyledTextField(owner);
         form.addView(titleField);
+        UIComponents.addSpacer(form, 8);
         form.addView(UIComponents.createLabel(owner, "URL:"));
         urlField = UIComponents.createStyledTextField(owner);
-        urlField.setInputType(android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        urlField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         form.addView(urlField);
+        UIComponents.addSpacer(form, 8);
 
-        addSpacer(form, 10);
-
-        // ===== レシピカテゴリー(複数選択チェックボックス) =====
+        // ===== レシピのカテゴリー(複数選択チェックボックス) =====
         form.addView(UIComponents.createLabel(owner, "レシピのカテゴリー (複数選択可):"));
-        GridLayout catGrid = new GridLayout(owner);
-        catGrid.setColumnCount(3);
+        form.addView(buildCategoryGrid());
+        UIComponents.addSpacer(form, 8);
+
+        // ===== 食材選択(カテゴリ → 食材 → 追加ボタン) =====
+        form.addView(UIComponents.createLabel(owner, "カテゴリから食材を選択:"));
+        Spinner catSpinner = new Spinner(owner);
+        catSpinner.setAdapter(UIComponents.createSpinnerAdapter(owner, IngredientCategory.values()));
+        form.addView(catSpinner);
+        Spinner ingSpinner = new Spinner(owner);
+        form.addView(ingSpinner);
+        catSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                IngredientCategory cat = (IngredientCategory) parent.getItemAtPosition(position);
+                ingSpinner.setAdapter(UIComponents.createSpinnerAdapter(
+                        owner, owner.getIngredientMaster().searchIngredient(cat)));
+            }
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+
+        Button btnAdd = UIComponents.createButton(owner, "選択した食材を追加");
+        btnAdd.setOnClickListener(v -> {
+            Object selected = ingSpinner.getSelectedItem();
+            if (selected instanceof Ingredient) addIngredientRow((Ingredient) selected, Quantity.EMPTY);
+        });
+        form.addView(btnAdd);
+        UIComponents.addSpacer(form, 16);
+
+        // ===== 使用する食材と分量 =====
+        form.addView(UIComponents.createLabel(owner,
+                "使用する食材と分量 (数量を入力し、単位は候補から選ぶか直接入力。✕で解除):"));
+        rowsContainer = new LinearLayout(owner);
+        rowsContainer.setOrientation(LinearLayout.VERTICAL);
+        form.addView(rowsContainer);
+        UIComponents.addSpacer(form, 16);
+
+        btnAi.setOnClickListener(v -> requestAiSuggestion(btnAi));
+
+        Button btnSubmit = UIComponents.createPrimaryButton(owner, editTarget == null ? "レシピを保存" : "レシピを更新");
+        btnSubmit.setOnClickListener(v -> submitRecipe());
+        form.addView(btnSubmit);
+
+        // 編集モードのときは既存レシピの内容をフォームに復元
+        if (editTarget != null) {
+            prefillFromRecipe(editTarget);
+        } else {
+            refreshEmptyMessage();
+        }
+    }
+
+    /**
+     * フォームヘッダー(タイトル文字列 + AIボタン)を構築する。
+     * @param btnAi AI自動提案ボタン
+     * @return ヘッダー
+     */
+    private LinearLayout buildHeader(Button btnAi) {
+        LinearLayout header = new LinearLayout(owner);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView titleLabel = UIComponents.createTitleLabel(owner, editTarget == null ? "新規レシピ登録" : "レシピ編集");
+        header.addView(titleLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        header.addView(btnAi);
+        return header;
+    }
+
+    /**
+     * レシピカテゴリーのチェックボックスを3列で並べる(JList の複数選択の置き換え)。
+     * @return チェックボックスのグリッド
+     */
+    private GridLayout buildCategoryGrid() {
+        GridLayout grid = new GridLayout(owner);
+        grid.setColumnCount(3);
         RecipeCategory[] cats = RecipeCategory.values();
         for (int i = 0; i < cats.length; i++) {
             CheckBox cb = new CheckBox(owner);
@@ -103,101 +191,78 @@ public class RegisterRecipePanel extends ScrollView {
             lp.width = 0;
             cb.setLayoutParams(lp);
             categoryChecks[i] = cb;
-            catGrid.addView(cb);
+            grid.addView(cb);
         }
-        form.addView(catGrid);
-
-        addSpacer(form, 10);
-
-        // ===== 食材選択(カテゴリSpinner → 食材Spinner → 追加ボタン) =====
-        form.addView(UIComponents.createLabel(owner, "カテゴリから食材を選択:"));
-        Spinner catSpinner = new Spinner(owner);
-        catSpinner.setAdapter(UIComponents.createSpinnerAdapter(owner, IngredientCategory.values()));
-        form.addView(catSpinner);
-
-        Spinner ingSpinner = new Spinner(owner);
-        form.addView(ingSpinner);
-
-        catSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                IngredientCategory cat = (IngredientCategory) parent.getItemAtPosition(position);
-                ArrayList<Ingredient> list = owner.getIngredientMaster().searchIngredient(cat);
-                ingSpinner.setAdapter(UIComponents.createSpinnerAdapter(owner, list));
-            }
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
-        });
-
-        Button btnAdd = new Button(owner);
-        btnAdd.setText("選択した食材を追加");
-        btnAdd.setAllCaps(false);
-        btnAdd.setOnClickListener(v -> {
-            Object sel = ingSpinner.getSelectedItem();
-            if (sel instanceof Ingredient && !selectedIngredients.contains(sel)) {
-                selectedIngredients.add((Ingredient) sel);
-                refreshSelectedList();
-            }
-        });
-        form.addView(btnAdd);
-
-        addSpacer(form, 16);
-
-        // ===== 選択済み食材一覧(タップで解除) =====
-        form.addView(UIComponents.createLabel(owner, "使用する食材 (タップで解除):"));
-        selectedContainer = new LinearLayout(owner);
-        selectedContainer.setOrientation(LinearLayout.VERTICAL);
-        form.addView(selectedContainer);
-
-        addSpacer(form, 16);
-
-        // ===== 保存ボタン =====
-        Button btnSubmit = UIComponents.createPrimaryButton(owner,
-                editTarget == null ? "レシピを保存" : "レシピを更新");
-        btnSubmit.setOnClickListener(v -> submitRecipe());
-        form.addView(btnSubmit);
-
-        btnAi.setOnClickListener(v -> requestAiSuggestion(btnAi));
-
-        // 編集モードのときは既存レシピの内容をフォームに復元
-        if (editTarget != null) {
-            prefillFromRecipe(editTarget);
-        }
+        return grid;
     }
 
     /**
-     * 縦方向スペーサを追加する。
-     * @param parent   追加先
-     * @param heightDp スペーサの高さ(dp)
+     * 使用する食材の一覧に1行追加する。既に同じ食材がある場合は何もしない。
+     * @param ing      追加する食材
+     * @param quantity その食材の分量
      */
-    private void addSpacer(LinearLayout parent, int heightDp) {
-        View spacer = new View(owner);
-        parent.addView(spacer, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, UIComponents.dp(owner, heightDp)));
+    private void addIngredientRow(Ingredient ing, Quantity quantity) {
+        for (IngredientRow r : rows) {
+            if (r.ingredient.equals(ing)) return;
+        }
+        LinearLayout row = new LinearLayout(owner);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView name = UIComponents.createLabel(owner, ing.getName());
+        row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        EditText amount = UIComponents.createStyledTextField(owner);
+        amount.setHint("数量");
+        amount.setText(quantity.getAmount());
+        row.addView(amount, new LinearLayout.LayoutParams(UIComponents.dp(owner, 72), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        AutoCompleteTextView unit = UIComponents.createUnitField(owner);
+        unit.setText(quantity.getUnit(), false);
+        row.addView(unit, new LinearLayout.LayoutParams(UIComponents.dp(owner, 100), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button remove = UIComponents.createButton(owner, "✕");
+        remove.setMinWidth(0);
+        remove.setMinimumWidth(0);
+        row.addView(remove, new LinearLayout.LayoutParams(UIComponents.dp(owner, 48), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        IngredientRow entry = new IngredientRow(ing, amount, unit, row);
+        remove.setOnClickListener(v -> {
+            rows.remove(entry);
+            rowsContainer.removeView(row);
+            refreshEmptyMessage();
+        });
+        rows.add(entry);
+        rowsContainer.addView(row);
+        refreshEmptyMessage();
     }
 
     /**
-     * 選択済み食材の表示を selectedIngredients の内容で再構築する。
-     * 各行はタップすると選択解除される。
+     * 食材が1つも無いときだけ「まだ食材が選択されていません」を表示する。
      */
-    private void refreshSelectedList() {
-        selectedContainer.removeAllViews();
-        if (selectedIngredients.isEmpty()) {
+    private void refreshEmptyMessage() {
+        View existing = rowsContainer.findViewWithTag("empty");
+        if (rows.isEmpty() && existing == null) {
             TextView empty = UIComponents.createLabel(owner, "(まだ食材が選択されていません)");
-            empty.setTextColor(0xFF888888);
-            selectedContainer.addView(empty);
-            return;
+            empty.setTextColor(Theme.COLOR_MUTED);
+            empty.setTag("empty");
+            rowsContainer.addView(empty);
+        } else if (!rows.isEmpty() && existing != null) {
+            rowsContainer.removeView(existing);
         }
-        for (Ingredient ing : new ArrayList<>(selectedIngredients)) {
-            TextView row = UIComponents.createLabel(owner, "・" + ing.getName() + "　✕");
-            int p = UIComponents.dp(owner, 8);
-            row.setPadding(p, p, p, p);
-            row.setOnClickListener(v -> {
-                selectedIngredients.remove(ing);
-                refreshSelectedList();
-            });
-            selectedContainer.addView(row);
+    }
+
+    /**
+     * 使用する食材の一覧を指定レシピの食材と分量で置き換える。
+     * @param r 表示するレシピ
+     */
+    private void showIngredients(Recipe r) {
+        for (IngredientRow row : rows) rowsContainer.removeView(row.root);
+        rows.clear();
+        for (Ingredient ing : r.getIngredients()) {
+            addIngredientRow(ing, r.getQuantity(ing));
         }
+        refreshEmptyMessage();
     }
 
     /**
@@ -207,12 +272,16 @@ public class RegisterRecipePanel extends ScrollView {
     private void prefillFromRecipe(Recipe r) {
         titleField.setText(r.getTitle());
         urlField.setText(r.getUrl());
-        for (Ingredient ing : r.getIngredients()) {
-            if (!selectedIngredients.contains(ing)) selectedIngredients.add(ing);
-        }
-        refreshSelectedList();
+        showIngredients(r);
+        selectCategories(r.getCategories());
+    }
+
+    /**
+     * カテゴリーのチェックボックスで、指定したカテゴリーだけをチェック状態にする。
+     * @param cats チェックするカテゴリー
+     */
+    private void selectCategories(EnumSet<RecipeCategory> cats) {
         RecipeCategory[] all = RecipeCategory.values();
-        EnumSet<RecipeCategory> cats = r.getCategories();
         for (int i = 0; i < all.length; i++) {
             categoryChecks[i].setChecked(cats.contains(all[i]));
         }
@@ -223,78 +292,49 @@ public class RegisterRecipePanel extends ScrollView {
      * @param btnAi 押下されたAIボタン(処理中は無効化される)
      */
     private void requestAiSuggestion(Button btnAi) {
-        // Ollama はローカルLLMなのでAPIキー不要。それ以外はAPIキー必須
-        if (owner.getCurrentAiProvider() != RecipeAIService.Provider.OLLAMA
-                && owner.getCurrentApiKey().isEmpty()) {
-            UIComponents.info(owner, "先に「AI設定」メニューからAPIキーを入力してください");
-            return;
-        }
+        if (!UIComponents.ensureAiReady(owner, owner.getAiSettings())) return;
         btnAi.setText("生成中...");
         btnAi.setEnabled(false);
 
         String url = urlField.getText().toString().trim();
+        List<String> names = owner.getIngredientMaster().getAllIngredientNames();
         UIComponents.runAsync(
-                () -> {
-                    RecipeAIService aiService = new RecipeAIService();
-                    aiService.setConfig(owner.getCurrentAiProvider(), owner.getCurrentApiKey(), owner.getCurrentModelName());
-                    return aiService.suggestRecipe(url, owner.getIngredientMaster().getAllIngredients());
-                },
-                result -> {
-                    if (applyAiResult(result)) {
+                () -> owner.getAiSettings().createService().suggestRecipe(url, names, RecipeCategory.displayNames()),
+                suggestion -> {
+                    btnAi.setText(AI_BUTTON_LABEL);
+                    btnAi.setEnabled(true);
+                    if (applyAiResult(suggestion, url)) {
                         UIComponents.info(owner, "AIがレシピを提案しました");
                     }
                     // 検出できなかった場合はフォームを書き換えず、ダイアログも出さない
-                    btnAi.setText("✨ AI自動提案");
-                    btnAi.setEnabled(true);
                 },
                 ex -> {
+                    btnAi.setText(AI_BUTTON_LABEL);
+                    btnAi.setEnabled(true);
                     UIComponents.info(owner, "エラー",
                             "AIの呼び出しに失敗しました。\n設定内容を確認してください。\n\n" + ex.getMessage());
                     ex.printStackTrace();
-                    btnAi.setText("✨ AI自動提案");
-                    btnAi.setEnabled(true);
                 });
     }
 
     /**
-     * AIの返したレシピをフォームに反映する。
-     * タイトルが空、または食材マスタとマッチする食材が0個の場合は
-     * 「検出できなかった」と判断し、フォームには一切手を加えず false を返す。
-     * @param result AIから返ってきた {タイトル, "食材1,食材2,…"} 配列
+     * AIの返したレシピ(タイトル・食材・分量・カテゴリー)をフォームに反映する。
+     * タイトルが空、または食材が0個の場合は「検出できなかった」と判断し、
+     * フォームには一切手を加えず false を返す。
+     * AIがカテゴリーを1つも選べなかった場合は、カテゴリーの選択を変更しない。
+     * @param suggestion AIが提案したレシピ
+     * @param url        AIに渡したURL
      * @return 反映に成功すれば true、検出失敗時は false
      */
-    private boolean applyAiResult(String[] result) {
-        String aiTitle = (result == null || result.length < 1 || result[0] == null) ? "" : result[0].trim();
-        String aiIngsRaw = (result == null || result.length < 2 || result[1] == null) ? "" : result[1];
+    private boolean applyAiResult(RecipeSuggestion suggestion, String url) {
+        // AIが未知の食材を返した場合は OTHER カテゴリで自動的にマスタに追加される
+        Recipe suggested = BatchUrlImporter.toRecipe(suggestion, url, owner.getIngredientMaster());
+        if (suggested == null) return false;
 
-        ArrayList<Ingredient> matched = new ArrayList<>();
-        for (String aiIngName : aiIngsRaw.split(",")) {
-            String cleanName = aiIngName.trim();
-            if (cleanName.isEmpty()) continue;
-            Ingredient resolved = null;
-            for (Ingredient ing : owner.getIngredientMaster().getAllIngredients()) {
-                if (ing.getName().equals(cleanName)) {
-                    resolved = ing;
-                    break;
-                }
-            }
-            // AIが未知の食材を返した場合は OTHER カテゴリで自動的にマスタに追加
-            if (resolved == null) {
-                resolved = owner.getIngredientMaster().addIngredient(cleanName);
-            }
-            if (resolved != null && !matched.contains(resolved)) {
-                matched.add(resolved);
-            }
-        }
-
-        if (aiTitle.isEmpty() || matched.isEmpty()) {
-            return false;
-        }
-
-        titleField.setText(aiTitle);
-        selectedIngredients.clear();
-        selectedIngredients.addAll(matched);
-        refreshSelectedList();
+        titleField.setText(suggested.getTitle());
+        showIngredients(suggested);
+        EnumSet<RecipeCategory> aiCategories = RecipeCategory.fromLabels(suggestion.categories);
+        if (!aiCategories.isEmpty()) selectCategories(aiCategories);
         return true;
     }
 
@@ -306,27 +346,33 @@ public class RegisterRecipePanel extends ScrollView {
         String title = titleField.getText().toString().trim();
         String url = urlField.getText().toString().trim();
 
-        if (title.isEmpty() || url.isEmpty() || selectedIngredients.isEmpty()) {
+        if (title.isEmpty() || url.isEmpty() || rows.isEmpty()) {
             UIComponents.info(owner, "入力エラー", "入力されていない箇所があります");
             return;
         }
 
-        ArrayList<Ingredient> ings = new ArrayList<>(selectedIngredients);
+        ArrayList<Ingredient> ings = new ArrayList<>();
+        Map<String, Quantity> quantities = new LinkedHashMap<>();
+        for (IngredientRow row : rows) {
+            ings.add(row.ingredient);
+            quantities.put(row.ingredient.getName(), Quantity.of(
+                    row.amountField.getText().toString(), row.unitField.getText().toString()));
+        }
 
+        // 未選択の場合は Recipe 側で OTHER になる
         EnumSet<RecipeCategory> categories = EnumSet.noneOf(RecipeCategory.class);
         RecipeCategory[] all = RecipeCategory.values();
         for (int i = 0; i < all.length; i++) {
             if (categoryChecks[i].isChecked()) categories.add(all[i]);
         }
-        if (categories.isEmpty()) categories.add(RecipeCategory.OTHER);
 
+        Recipe recipe = new Recipe(title, url, ings, quantities, categories);
         if (editTarget == null) {
-            owner.getAllRecipeList().addRecipe(new Recipe(title, url, ings, categories));
+            owner.getAllRecipeList().addRecipe(recipe);
             UIComponents.info(owner, "レシピ「" + title + "」を登録しました");
         } else {
-            Recipe updated = new Recipe(title, url, ings, categories);
-            updated.setId(editTarget.getId());
-            owner.getAllRecipeList().updateRecipe(updated);
+            recipe.setId(editTarget.getId());
+            owner.getAllRecipeList().updateRecipe(recipe);
             UIComponents.info(owner, "レシピ「" + title + "」を更新しました");
         }
         owner.showWelcome();

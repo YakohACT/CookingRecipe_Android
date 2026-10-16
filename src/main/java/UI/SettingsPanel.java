@@ -1,10 +1,10 @@
 package main.java.UI;
 
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -13,48 +13,46 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import main.java.MainActivity;
-import main.java.AI.Ollama.OllamaProvider;
+import main.java.AI.AiSettings;
 import main.java.AI.RecipeAIService;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
 /**
  * AI利用設定画面パネル。
- * APIキーは OpenAI / Gemini / Claude / Ollama それぞれで個別に保存され、
+ * APIキーは OpenAI / Gemini / Claude それぞれで個別に保存され、
  * プロバイダーを切替えると該当プロバイダーの保存済みキーが復元される。
+ * Ollama / llama.cpp 選択時は APIキーの代わりにサーバーのURLを設定する。
  *
  * モデル一覧は次のタイミングで API から動的取得する:
  *   - プロバイダー切替時
+ *   - APIキー / サーバーURL欄からフォーカスが外れた時(入力直後)
  *   - 「更新」ボタン押下時
  * 取得失敗時は各プロバイダーの静的フォールバックリストにフォールバックする。
- *
- * Android 追加要素: Ollama 選択時は APIキー欄の代わりに
- * Ollama サーバーURL(例: 同一LAN上のPC)の入力欄を表示する。
  */
 public class SettingsPanel extends ScrollView {
 
-    private final MainActivity owner;
+    private static final String REFRESH_LABEL = "更新";
+
+    private final AiSettings ai;
     private final Spinner providerSpinner;
     private final Spinner modelSpinner;
     private final Button refreshBtn;
     private final EditText keyField;
+    private final EditText urlField;
     private final LinearLayout keySection;
-    private final LinearLayout ollamaSection;
-    private final EditText ollamaUrlField;
-
-    /** 現在モデルSpinnerに表示中のモデル一覧 */
-    private List<String> currentModels = new ArrayList<>();
+    private final LinearLayout urlSection;
+    private final TextView urlLabel;
 
     /**
      * AI設定パネルを構築する。プロバイダー切替で該当プロバイダーの保存済みモデル/キーを復元し、
      * モデル一覧は API から非同期で動的取得する。
-     * @param owner 共有状態(プロバイダー、モデル、APIキー等)を保持するアクティビティ
+     * @param owner 共有状態(AI利用設定)を保持するアクティビティ
      */
     public SettingsPanel(MainActivity owner) {
         super(owner);
-        this.owner = owner;
+        this.ai = owner.getAiSettings();
 
         LinearLayout form = new LinearLayout(owner);
         form.setOrientation(LinearLayout.VERTICAL);
@@ -64,191 +62,165 @@ public class SettingsPanel extends ScrollView {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         form.addView(UIComponents.createTitleLabel(owner, "AI利用設定"));
-        addSpacer(form, 16);
+        UIComponents.addSpacer(form, 16);
 
         form.addView(UIComponents.createLabel(owner, "利用するAIプロバイダー:"));
         providerSpinner = new Spinner(owner);
-        providerSpinner.setAdapter(UIComponents.createSpinnerAdapter(owner, RecipeAIService.Provider.values()));
-        providerSpinner.setSelection(indexOfProvider(owner.getCurrentAiProvider()));
+        RecipeAIService.Provider[] providers = RecipeAIService.Provider.values();
+        providerSpinner.setAdapter(UIComponents.createSpinnerAdapter(owner, providers));
+        providerSpinner.setSelection(Arrays.asList(providers).indexOf(ai.getProvider()));
         form.addView(providerSpinner);
-        addSpacer(form, 12);
+        UIComponents.addSpacer(form, 12);
 
+        // モデル選択と更新ボタンを横並びにする
         form.addView(UIComponents.createLabel(owner, "利用するモデル:"));
         LinearLayout modelRow = new LinearLayout(owner);
         modelRow.setOrientation(LinearLayout.HORIZONTAL);
+        modelRow.setGravity(Gravity.CENTER_VERTICAL);
         modelSpinner = new Spinner(owner);
         modelRow.addView(modelSpinner, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        refreshBtn = new Button(owner);
-        refreshBtn.setText("更新");
-        refreshBtn.setAllCaps(false);
+        refreshBtn = UIComponents.createButton(owner, REFRESH_LABEL);
+        refreshBtn.setOnClickListener(v -> populateModels());
         modelRow.addView(refreshBtn);
         form.addView(modelRow);
 
-        // ===== APIキー入力欄 (Ollama選択時は非表示) =====
+        // APIキー欄はローカルLLM(Ollama / llama.cpp)選択時に非表示にしたいので、ラベル+入力欄を
+        // 1つのコンテナにまとめて表示/非表示を一括制御する
         keySection = new LinearLayout(owner);
         keySection.setOrientation(LinearLayout.VERTICAL);
-        addSpacer(keySection, 12);
+        UIComponents.addSpacer(keySection, 12);
         keySection.addView(UIComponents.createLabel(owner, "APIキー (プロバイダーごとに別々に保存されます):"));
-        keyField = new EditText(owner);
-        keyField.setSingleLine(true);
-        keyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        keySection.addView(keyField, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        keyField = UIComponents.createPasswordField(owner);
+        keySection.addView(keyField);
         form.addView(keySection);
 
-        // ===== OllamaサーバーURL入力欄 (Ollama選択時のみ表示) =====
-        ollamaSection = new LinearLayout(owner);
-        ollamaSection.setOrientation(LinearLayout.VERTICAL);
-        addSpacer(ollamaSection, 12);
-        ollamaSection.addView(UIComponents.createLabel(owner,
-                "OllamaサーバーURL (例: http://192.168.1.10:11434):"));
-        TextView hint = UIComponents.createLabel(owner,
-                "Android 端末内では Ollama は動作しないため、同一ネットワーク上のPCで\n"
-                + "`ollama serve` を起動し、そのPCのアドレスを指定してください。\n"
-                + "空欄の場合は " + OllamaProvider.DEFAULT_BASE_URL + " に接続します。");
-        hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f);
-        hint.setTextColor(0xFF888888);
-        ollamaSection.addView(hint);
-        ollamaUrlField = new EditText(owner);
-        ollamaUrlField.setSingleLine(true);
-        ollamaUrlField.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
-        ollamaUrlField.setText(owner.getOllamaUrl());
-        ollamaSection.addView(ollamaUrlField, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        form.addView(ollamaSection);
+        // ローカルLLM選択時だけ表示するサーバーURL欄
+        // (スマートフォンからは PC 上のサーバーへ LAN 経由で接続することが多いため、Ollama も URL を設定できる)
+        urlSection = new LinearLayout(owner);
+        urlSection.setOrientation(LinearLayout.VERTICAL);
+        UIComponents.addSpacer(urlSection, 12);
+        urlLabel = UIComponents.createLabel(owner, "");
+        urlSection.addView(urlLabel);
+        urlField = UIComponents.createStyledTextField(owner);
+        urlField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        urlSection.addView(urlField);
+        TextView urlHint = UIComponents.createLabel(owner,
+                "PC のサーバーに接続する場合は、PC 側で LAN からの接続を許可して起動してください"
+                + "(Ollama: 環境変数 OLLAMA_HOST=0.0.0.0 / llama-server: --host 0.0.0.0)。"
+                + "Android エミュレータからホスト PC へは 10.0.2.2 で接続できます。");
+        urlHint.setTextColor(Theme.COLOR_MUTED);
+        urlHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f);
+        urlSection.addView(urlHint);
+        form.addView(urlSection);
 
-        addSpacer(form, 24);
-        Button btnSave = UIComponents.createPrimaryButton(owner, "設定を保存");
-        form.addView(btnSave);
-
-        // ===== イベント =====
+        // プロバイダー切替時(初回表示を含む)にキー/URL欄の表示と中身を更新し、モデル一覧も再取得
         providerSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                RecipeAIService.Provider p = (RecipeAIService.Provider) parent.getItemAtPosition(position);
-                keyField.setText(p == null ? "" : owner.getApiKeyFor(p));
-                applyKeyVisibility();
+                RecipeAIService.Provider p = selectedProvider();
+                keyField.setText(ai.getApiKey(p));
+                urlField.setText(ai.getServerUrl(p));
+                applySectionVisibility(p);
                 populateModels();
             }
             @Override
             public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        refreshBtn.setOnClickListener(v -> populateModels());
+        // APIキー / URL 入力後フォーカスが外れたタイミングでモデル一覧を更新
+        View.OnFocusChangeListener refreshOnFocusLost = (v, hasFocus) -> {
+            if (!hasFocus) populateModels();
+        };
+        keyField.setOnFocusChangeListener(refreshOnFocusLost);
+        urlField.setOnFocusChangeListener(refreshOnFocusLost);
 
+        UIComponents.addSpacer(form, 24);
+        Button btnSave = UIComponents.createPrimaryButton(owner, "設定を保存");
         btnSave.setOnClickListener(v -> {
             RecipeAIService.Provider selected = selectedProvider();
-            owner.setCurrentAiProvider(selected);
-            Object model = modelSpinner.getSelectedItem();
-            owner.setModelFor(selected, model == null ? "" : model.toString());
-            if (selected == RecipeAIService.Provider.OLLAMA) {
-                // Ollama はキー不要。代わりに接続先URLを保存
-                owner.setOllamaUrl(ollamaUrlField.getText().toString().trim());
+            ai.setProvider(selected);
+            ai.setModel(selected, UIComponents.selectedItem(modelSpinner));
+            // ローカルLLMはキー不要なので保存スキップ
+            if (selected.requiresApiKey()) {
+                ai.setApiKey(selected, keyField.getText().toString().trim());
             } else {
-                owner.setApiKeyFor(selected, keyField.getText().toString().trim());
+                ai.setServerUrl(selected, urlField.getText().toString());
             }
             UIComponents.info(owner, "設定を保存しました");
             owner.showWelcome();
         });
-
-        // 初期表示
-        RecipeAIService.Provider initial = owner.getCurrentAiProvider();
-        keyField.setText(owner.getApiKeyFor(initial));
-        applyKeyVisibility();
-        populateModels();
+        form.addView(btnSave);
     }
 
     /**
-     * 縦方向スペーサを追加する。
-     * @param parent   追加先
-     * @param heightDp スペーサの高さ(dp)
-     */
-    private void addSpacer(LinearLayout parent, int heightDp) {
-        View spacer = new View(owner);
-        parent.addView(spacer, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, UIComponents.dp(owner, heightDp)));
-    }
-
-    /**
-     * Provider.values() 内でのインデックスを返す(Spinner初期選択用)。
-     * @param p 対象プロバイダー
-     * @return values() 内の位置(見つからなければ 0)
-     */
-    private static int indexOfProvider(RecipeAIService.Provider p) {
-        RecipeAIService.Provider[] all = RecipeAIService.Provider.values();
-        for (int i = 0; i < all.length; i++) {
-            if (all[i] == p) return i;
-        }
-        return 0;
-    }
-
-    /**
-     * @return Spinner で現在選択中のプロバイダー
+     * @return プロバイダー選択欄で選ばれているプロバイダー
      */
     private RecipeAIService.Provider selectedProvider() {
-        Object item = providerSpinner.getSelectedItem();
-        return (item instanceof RecipeAIService.Provider)
-                ? (RecipeAIService.Provider) item : RecipeAIService.Provider.OPENAI;
+        return UIComponents.selectedItem(providerSpinner);
     }
 
     /**
-     * Ollama 選択時は APIキー欄を隠して OllamaサーバーURL欄を表示し、
-     * それ以外のプロバイダーでは逆にする。
+     * ローカルLLMはAPIキー不要なので、選択時はキー欄を丸ごと非表示にしてURL欄を出す。
+     * @param p 選択中のプロバイダー
      */
-    private void applyKeyVisibility() {
-        boolean isOllama = selectedProvider() == RecipeAIService.Provider.OLLAMA;
-        keySection.setVisibility(isOllama ? GONE : VISIBLE);
-        ollamaSection.setVisibility(isOllama ? VISIBLE : GONE);
+    private void applySectionVisibility(RecipeAIService.Provider p) {
+        keySection.setVisibility(p.requiresApiKey() ? VISIBLE : GONE);
+        urlSection.setVisibility(p.isLocal() ? VISIBLE : GONE);
+        if (p == RecipeAIService.Provider.LLAMA_CPP) {
+            urlLabel.setText("llama-server のURL (起動時に表示される listening on のアドレス。例: http://192.168.1.10:9931):");
+            urlField.setHint("http://192.168.1.10:9931");
+        } else {
+            urlLabel.setText("Ollama サーバーのURL (空欄なら端末内の http://localhost:11434。例: http://192.168.1.10:11434):");
+            urlField.setHint("http://localhost:11434");
+        }
     }
 
     /**
      * モデル一覧を更新する。
-     * ステップ1: 静的フォールバックを即時表示し、UIに何か出た状態にする。
-     * ステップ2: バックグラウンドで API を叩き、結果が返ったらSpinnerの中身を差し替える。
+     * ステップ1: 静的フォールバックを即時表示し、UIに何か出た状態にする
+     * ステップ2: バックグラウンドで API を叩き、結果が返ったら一覧の中身を差し替える
      */
     private void populateModels() {
         RecipeAIService.Provider p = selectedProvider();
-        RecipeAIService service = new RecipeAIService();
+        if (p == null) return;
 
         // ステップ1: 静的リストを先に出す
-        setModels(Arrays.asList(service.getModelsForProvider(p)), owner.getModelFor(p));
+        String[] defaults = RecipeAIService.defaultModels(p);
+        setModels(defaults, ai.getModel(p));
 
         // ステップ2: 非同期に API から取得
         String currentKey = keyField.getText().toString().trim();
+        String currentUrl = urlField.getText().toString().trim();
         refreshBtn.setEnabled(false);
         refreshBtn.setText("取得中...");
         UIComponents.runAsync(
-                () -> service.fetchModelsForProvider(p, currentKey),
+                () -> RecipeAIService.fetchModels(p, currentKey, currentUrl),
                 models -> {
-                    refreshBtn.setText("更新");
+                    refreshBtn.setText(REFRESH_LABEL);
                     refreshBtn.setEnabled(true);
-                    if (models == null || models.length == 0) return;
+                    // 取得中に別のプロバイダーへ切り替えられていたら結果を捨てる
+                    if (selectedProvider() != p || models == null || models.length == 0) return;
                     // 現在の選択を維持できるなら維持する
-                    Object sel = modelSpinner.getSelectedItem();
-                    String currentSel = sel == null ? null : sel.toString();
-                    String prefer = (currentSel != null && Arrays.asList(models).contains(currentSel))
-                            ? currentSel : owner.getModelFor(p);
-                    setModels(Arrays.asList(models), prefer);
+                    String currentSel = UIComponents.selectedItem(modelSpinner);
+                    setModels(models, currentSel != null && Arrays.asList(models).contains(currentSel)
+                            ? currentSel : ai.getModel(p));
                 },
                 ex -> {
                     // 既に静的フォールバックが入っている
-                    refreshBtn.setText("更新");
+                    refreshBtn.setText(REFRESH_LABEL);
                     refreshBtn.setEnabled(true);
                 });
     }
 
     /**
-     * モデルSpinnerの中身を差し替え、可能なら指定モデルを選択状態にする。
-     * @param models   表示するモデル一覧
-     * @param selected 選択したいモデル名(null/不在時は先頭)
+     * モデル一覧の中身を差し替え、指定モデルがあれば選択する。
+     * @param models   表示するモデル名
+     * @param selected 選択したいモデル名(null可)
      */
-    private void setModels(List<String> models, String selected) {
-        currentModels = new ArrayList<>(models);
-        ArrayAdapter<String> adapter = UIComponents.createSpinnerAdapter(owner, currentModels);
-        modelSpinner.setAdapter(adapter);
-        if (selected != null && !selected.isEmpty()) {
-            int idx = currentModels.indexOf(selected);
-            if (idx >= 0) modelSpinner.setSelection(idx);
-        }
+    private void setModels(String[] models, String selected) {
+        List<String> list = Arrays.asList(models);
+        modelSpinner.setAdapter(UIComponents.createSpinnerAdapter(getContext(), list));
+        int idx = selected == null ? -1 : list.indexOf(selected);
+        if (idx >= 0) modelSpinner.setSelection(idx);
     }
 }
